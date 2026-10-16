@@ -42,6 +42,7 @@ class EnergyTimeline:
                         "native-band audio.spectral_centroid measurement. "
                         "Segment LUFS are ungated descriptors rather than integrated gated program loudness. "
                         f"Detailed intervals use {self.basis}. "
+                        "Uniform segments widen beyond 10 s on long files so at most 64 cover the whole recording. "
                         "These measures cannot distinguish emotional intensity from mix level or distortion.")
         return ctx.estimate("audio.energy_timeline", value, "descriptors", method, cuts)
 
@@ -88,13 +89,14 @@ def energy(store: FeatureStore, *, structure, beats, meter=None) -> EnergyTimeli
     peaks = indices / store.onset_rate
     peaks = peaks[peaks < store.seconds]
     if isinstance(structure, Skip) or structure is None:
-        edges = np.unique(np.r_[np.arange(0, store.seconds, 10.0), store.seconds])
+        edges = np.unique(np.r_[np.arange(0, store.seconds, max(10.0, store.seconds / SUMMARY_SEGMENTS)), store.seconds])
         segmented_by = "uniform"
     else:
         edges = structure.boundaries
         segmented_by = "structure"
     if meter is not None and not isinstance(meter, Skip) and len(meter.downbeats):
-        bars = np.unique(np.r_[0.0, meter.downbeats, store.seconds])
+        downbeats = np.asarray(meter.downbeats)
+        bars = np.unique(np.r_[downbeats[(downbeats >= 0) & (downbeats < store.seconds)], store.seconds])
         basis, detail_key = "inferred downbeat intervals", "perBar"
     elif beats is not None and not isinstance(beats, Skip):
         bars = np.unique(np.r_[0.0, beats.times, store.seconds])
@@ -104,7 +106,10 @@ def energy(store: FeatureStore, *, structure, beats, meter=None) -> EnergyTimeli
         basis, detail_key = "fixed 2 s intervals because a beat grid was unavailable", "perWindow"
     mean_loudness = _lufs(float(np.mean(loudness))) if loudness is not None and len(loudness) else None
     mean_brightness = float(np.mean(brightness)) if brightness is not None and len(brightness) else None
-    return EnergyTimeline(_segments(store, edges, peaks, loudness, brightness),
+    segments = _segments(store, edges, peaks, loudness, brightness)
+    if segmented_by == "structure" and getattr(structure, "letters", None) is not None:
+        segments = tuple({"letter": letter, **segment} for letter, segment in zip(structure.letters, segments))
+    return EnergyTimeline(segments,
                           _segments(store, bars, peaks, loudness, brightness), segmented_by,
                           mean_loudness, mean_brightness, len(peaks) / store.seconds, basis, detail_key)
 
@@ -115,7 +120,7 @@ class Mood:
     valence: float
     labels: tuple[str, ...]
     alternatives: tuple[str, ...]
-    inputs: dict[str, float | None]
+    inputs: dict[str, object]
 
     def report(self, ctx: ReportContext) -> Report:
         value = {"arousal": round(self.arousal, 3), "valence": round(self.valence, 3),
@@ -123,7 +128,8 @@ class Mood:
                  "inputs": self.inputs, "formula": MOOD_FORMULA}
         method = Method("descriptor-quadrant-mood-heuristic",
                         "available loudness, onset, tempo, brightness and harmony terms normalized into arousal "
-                        "and valence and ranked by distance to four quadrant centers. This is an untrained "
+                        "and valence and ranked by distance to four quadrant centers. Inputs include raw descriptors and "
+                        "their clipped normalized terms; loudness uses an ungated whole-file energy mean. This is an untrained "
                         "low-confidence heuristic, not emotion recognition or a probability. Lyrics, performance "
                         "intent, culture, context and the listener's response are unavailable; alternatives remain plausible.")
         return ctx.estimate("audio.mood_estimate", value, "heuristic scores", method)
@@ -149,7 +155,10 @@ def mood(energy: EnergyTimeline | Skip, *, tempo=None, rhythm=None, chords=None,
     inputs = {"loudness": _scaled(energy.mean_loudness, -30, -8),
               "onsetRate": _scaled(energy.onset_rate, 0, 8), "tempo": _scaled(bpm, 60, 180),
               "brightness": _scaled(energy.mean_brightness, 500, 4000),
-              "majorShare": major, "keyMode": key_mode}
+              "majorShare": major, "keyMode": key_mode,
+              "loudnessLufs": energy.mean_loudness, "brightnessHz": energy.mean_brightness,
+              "onsetsPerSecond": energy.onset_rate, "tempoBpm": bpm,
+              "majorShareFrom": "chords" if major is not None else "key" if key_mode is not None else None}
     arousal_terms = [inputs[name] for name in ("loudness", "onsetRate", "tempo", "brightness")
                      if inputs[name] is not None]
     harmony = major if major is not None else key_mode

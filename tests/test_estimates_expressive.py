@@ -79,6 +79,12 @@ class EnergyMoodTest(unittest.TestCase):
         self.assertEqual(result.segmented_by, "uniform")
         self.assertEqual(result.segments[-1]["endSeconds"], 64)
 
+    def test_uniform_long_file_covers_whole_duration(self):
+        store = features("A", 940)
+        result = energy.energy(store, structure=NONE, beats=NONE)
+        self.assertEqual(len(result.segments), 64)
+        self.assertEqual(result.segments[-1]["endSeconds"], 940)
+
     def test_energy_summary_cap_reports_cut(self):
         result = energy.energy(features(), structure=NONE, beats=NONE)
         result = replace(result, segments=tuple(result.segments[0] for _ in range(70)))
@@ -210,6 +216,36 @@ class RecordedSignalTest(unittest.TestCase):
                 predicted = np.array([point["midi"] for point in value["contour"]], dtype=float)
                 truth = np.repeat(notes, 4)
                 self.assertGreater(np.mean(np.abs(predicted - truth) <= 1), 0.90)
+
+    def test_recorded_chord_sections_with_drums(self):
+        from signals import RATE, _burst, click_track, progression, record
+        from music_guide.estimates import beats
+        chords = {"A": [(62, 65, 69), (58, 62, 65), (60, 64, 67), (57, 61, 64)],
+                  "B": [(64, 68, 71), (61, 64, 68), (66, 69, 73), (59, 63, 66)]}
+        hat = _burst(RATE, None, 0.03, 9)
+        parts = {letter: progression(notes, 8, 120) for letter, notes in chords.items()}
+        for at in np.arange(0, len(parts["B"]), int(RATE / 4)):
+            parts["B"][at:at + len(hat)] += 0.2 * hat[:len(parts["B"]) - at]
+        clicks, _, _ = click_track(120, 4, 64.6, start=0.)
+        for form, expected in (("ABAB", ("A", "B", "A", "B")),
+                               ("AABA", ("A", "B", "A")), ("AAAA", ("A",))):
+            with self.subTest(form=form):
+                audio = np.concatenate([parts[letter] for letter in form])
+                store = record(audio + clicks[:len(audio)], RATE, chunk=65536)
+                grid = beats.beat_grid(store, beats.tempo(store))
+                meter = beats.meter(store, grid)
+                result = structure.structure(store, beats=grid, meter=meter)
+                self.assertEqual(result.letters, expected)
+                wanted = [0, 16, 32, 48, 64] if form == "ABAB" else [0, 32, 48, 64] if form == "AABA" else [0, 64]
+                np.testing.assert_allclose(result.boundaries, wanted, atol=2)
+                if form == "ABAB":
+                    fixed = structure.structure(store, beats=NONE, meter=NONE)
+                    self.assertEqual(fixed.letters, expected)
+                    np.testing.assert_allclose(fixed.boundaries, wanted, atol=2)
+                    with patch.object(structure, "MAX_SEGMENTS", 2):
+                        capped = structure.structure(store, beats=NONE, meter=NONE).report(ReportContext("full", ""))
+                    self.assertLessEqual(len(capped.facts[0].value["segments"]), 2)
+                    self.assertTrue(capped.limits)
 
     def test_recorded_repeated_sections(self):
         from signals import midi_hz, record, tone

@@ -12,7 +12,8 @@ from .store import FeatureStore, bin_sum
 SUMMARY_SEGMENTS = 64
 MAX_SEGMENTS = 500
 MIN_SECONDS = 45.0
-KERNEL_RADIUS = 8
+# A side covers eight 4/4 bars on the beat grid or 16 s on the fixed grid, comparing loops rather than chords.
+KERNEL_RADIUS = 32
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class Structure:
         method = Method("local-self-similarity-novelty",
                         "Foote-style checkerboard novelty of standardized chroma and log-band timbre on a "
                         f"{self.basis} grid, with at most {KERNEL_RADIUS} units each side of each boundary. "
-                        "Kernel sums use feature-vector sums instead of a quadratic similarity matrix. "
+                        "Gaussian-tapered kernel sums use filtered feature vectors instead of a quadratic similarity matrix. "
                         "Peaks are snapped to inferred downbeats when available. Segment mean cosine similarity "
                         "assigns letters, which describe acoustic resemblance and cannot identify verse or chorus. "
                         "Gradual changes, repeated adjacent sections and changes in orchestration may be missed.")
@@ -79,24 +80,28 @@ def structure(store: FeatureStore, *, beats, meter) -> Structure | Skip:
         return Skip("structure has no pitched spectral energy to compare.")
     edges, basis = unit_edges(store.seconds, beats)
     duration = np.diff(edges)
-    chroma = _normalize(bin_sum(chroma, store.row_rate, edges))
+    chroma = bin_sum(chroma, store.row_rate, edges)
+    totals = np.sum(chroma, axis=1, keepdims=True)
+    chroma = np.divide(chroma, totals, out=np.zeros_like(chroma), where=totals > 0)
     timbre = getattr(store, "timbre", None)
     if timbre is None:
         timbre = np.zeros((len(store.pcp), 12))
     timbre = bin_sum(timbre, store.row_rate, edges) / np.maximum(duration[:, None] * store.row_rate, 1)
     features = np.concatenate([chroma, timbre], axis=1)
     spread = np.std(features, axis=0)
-    features = _normalize((features - np.mean(features, axis=0)) / np.maximum(spread, 0.1))
-    radius = min(KERNEL_RADIUS, 64, max(1, len(features) // 8))
-    sums = np.vstack([np.zeros(features.shape[1]), np.cumsum(features, axis=0)])
+    features = _normalize(np.divide(features - np.mean(features, axis=0), spread,
+                                    out=np.zeros_like(features), where=spread > 1e-8))
+    radius = min(KERNEL_RADIUS, 64, max(1, len(features) // 4))
+    weights = np.exp(-0.5 * ((np.arange(radius) + 0.5) / (radius * 0.5)) ** 2)
+    weights /= weights.sum()
+    trailing = signal.lfilter(weights, [1.0], features, axis=0)
+    leading = signal.lfilter(weights, [1.0], features[::-1], axis=0)[::-1]
     positions = np.arange(radius, len(features) - radius + 1)
     novelty = np.zeros(len(features))
-    left = (sums[positions] - sums[positions - radius]) / radius
-    right = (sums[positions + radius] - sums[positions]) / radius
-    novelty[positions] = np.maximum(0, np.sum((left - right) ** 2, axis=1) / 4)
-    minimum = max(1, int(round(8 / np.median(duration))))
-    peaks = signal.find_peaks(novelty, height=max(0.15, float(novelty.max()) * 0.25),
-                              prominence=0.10, distance=minimum)[0]
+    novelty[positions] = np.maximum(0, np.sum((trailing[positions - 1] - leading[positions]) ** 2, axis=1) / 4)
+    minimum = max(radius, int(round(8 / np.median(duration))))
+    peaks = signal.find_peaks(novelty, height=max(0.08, float(novelty.max()) * 0.25),
+                              prominence=0.03, distance=minimum)[0]
     downbeats = None if isinstance(meter, Skip) or meter is None else np.asarray(meter.downbeats)
     candidates = []
     for index in peaks:
@@ -116,14 +121,12 @@ def structure(store: FeatureStore, *, beats, meter) -> Structure | Skip:
         cuts = (f"Only the strongest {MAX_SEGMENTS - 1} of {len(chosen)} structure boundaries were retained.",)
         chosen = sorted(chosen, key=lambda t: novelty[np.argmin(np.abs(edges[:-1] - t))], reverse=True)[:MAX_SEGMENTS - 1]
     boundaries = np.array([0.0, *sorted(chosen), store.seconds])
-    # Uncentered block means retain resemblance between repeated sections even when the file changes little.
-    raw = np.concatenate([chroma, _normalize(timbre)], axis=1)
     centroids, counts, letters = [], [], []
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         inside = (edges[:-1] >= start) & (edges[:-1] < end)
-        mean = _normalize(np.mean(raw[inside], axis=0, keepdims=True))[0]
+        mean = _normalize(np.mean(features[inside], axis=0, keepdims=True))[0]
         similarity = np.asarray(centroids) @ mean if centroids else np.array([])
-        if similarity.size and float(similarity.max()) >= 0.92:
+        if similarity.size and float(similarity.max()) >= 0.5:
             label = int(np.argmax(similarity))
             centroids[label] = _normalize((centroids[label] * counts[label] + mean)[None, :])[0]
             counts[label] += 1
@@ -132,4 +135,8 @@ def structure(store: FeatureStore, *, beats, meter) -> Structure | Skip:
             centroids.append(mean)
             counts.append(1)
         letters.append(_label(label))
-    return Structure(boundaries, tuple(letters), novelty, basis, edges[:-1], cuts)
+    keep = [i for i, letter in enumerate(letters) if i == 0 or letter != letters[i - 1]]
+    boundaries = np.r_[boundaries[keep], boundaries[-1]]
+    names = {}
+    letters = tuple(names.setdefault(letters[i], _label(len(names))) for i in keep)
+    return Structure(boundaries, letters, novelty, basis, edges[:-1], cuts)
