@@ -74,6 +74,14 @@ class BeatGridTest(unittest.TestCase):
                 self.assertAlmostEqual(grid.bpm, expected, delta=1)
                 self.assertGreaterEqual(np.mean(nearest(truth, grid.times) <= 0.03), 0.95)
 
+    def test_louder_sixteenths_keep_the_beat_among_the_candidates(self):
+        # Sixteenth hats this loud make the three-sixteenth lag (120 BPM) the strongest peak, and 90 only the fifth.
+        for gain in (0.2, 0.25, 0.3):
+            with self.subTest(gain=gain):
+                samples, _ = with_hats(90, ((0.25, gain), (0.5, gain), (0.75, gain)))
+                tempo = beats.tempo(record(samples, RATE, chunk=65536))
+                self.assertTrue(any(abs(bpm - 90) <= 1 for bpm, _ in tempo.candidates), tempo)
+
     def test_tempo_range_edges_are_accepted(self):
         for bpm in (60, 200):
             with self.subTest(bpm=bpm):

@@ -201,7 +201,7 @@ class AudioMetricsTest(unittest.TestCase):
         fact = self.analyze(clicks)["facts"]["audio.tempo_estimate"]
         self.assertEqual((fact["provenance"], fact["confidence"], fact["unit"]), ("inferred", "low", "BPM"))
         candidates = fact["value"]["candidates"]
-        self.assertLessEqual(len(candidates), 3)
+        self.assertLessEqual(len(candidates), 5)
         self.assertTrue(all(60 <= item["bpm"] <= 200 for item in candidates))
         bpms = [item["bpm"] for item in candidates]
         if not any(abs(bpm - 120) <= 1.5 for bpm in bpms):

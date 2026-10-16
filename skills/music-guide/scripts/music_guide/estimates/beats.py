@@ -23,6 +23,9 @@ PRIOR_BPM, PRIOR_OCTAVES = 120.0, 1.0
 # The prior only chooses an octave: a candidate competes when it is within this share of half, once or twice the
 # strongest peak. A peak at 4/3 or 3/2 of the beat, from sixteenths or a three-against-two figure, never wins.
 OCTAVE_TOLERANCE = 0.06
+# Loud sixteenths give a peak at every multiple of the sixteenth, of nearly equal height: at 90 BPM with hats at
+# 0.2 to 0.3 of the click's gain the beat is the fifth strongest peak, after 120, 72, 180 and 60 BPM.
+TEMPO_CANDIDATES = 5
 TIGHTNESS = 100.0
 # Normalized onset autocorrelation at the beat period: white noise and a slow pad read at most 0.04, the three
 # reference songs 0.51 to 0.63.
@@ -66,16 +69,18 @@ SWING_SEARCH = (0.2, 0.85)
 
 TEMPO_METHOD = Method("onset-autocorrelation",
                       "top autocorrelation peaks of a spectral-flux onset envelope within 60-200 BPM, using FFT"
-                      " magnitudes averaged across channels before computing flux. Half, once and twice the strongest"
-                      " peak come first, ordered by strength weighted by a log-normal prior around 120 BPM; other"
-                      " peaks follow. Half- and double-time readings are equally consistent with periodicity alone;"
-                      " rubato, swing and tempo changes are averaged away.")
+                      " magnitudes averaged across channels before computing flux. relativeStrength is each peak's"
+                      " autocorrelation over the strongest peak's. Half, once and twice the strongest peak come first,"
+                      " ordered by strength weighted by a log-normal prior around 120 BPM, and the first candidate is"
+                      " the tempo the beat grid tracks; other peaks follow by strength. Half- and double-time readings"
+                      " are equally consistent with periodicity alone, and loud sixteenths can make a peak at 4/3 of"
+                      " the beat the strongest; rubato, swing and tempo changes are averaged away.")
 
 
 @dataclass(frozen=True)
 class TempoCandidates:
-    # (bpm, strength relative to the strongest peak), at most 3. The first is the beat grid's tempo: the octave of the
-    # strongest peak that the prior favours. Other octaves follow, then unrelated peaks by strength.
+    # (bpm, strength relative to the strongest peak), at most TEMPO_CANDIDATES. The first is the beat grid's tempo:
+    # the octave of the strongest peak that the prior favours. Other octaves follow, then unrelated peaks by strength.
     candidates: tuple[tuple[float, float], ...]
     octave_related: bool
     method: Method = TEMPO_METHOD
@@ -133,14 +138,14 @@ def tempo(store: FeatureStore) -> TempoCandidates | Skip:
         octave = any(abs(bpm / (strongest * ratio) - 1) < OCTAVE_TOLERANCE for ratio in (0.5, 1, 2))
         return (not octave, -strength * _prior(bpm) if octave else -strength)
 
-    top = tuple((bpm, round(strength / best, 3)) for strength, bpm in sorted(found[:3], key=rank))
+    top = tuple((bpm, round(strength / best, 3)) for strength, bpm in sorted(found[:TEMPO_CANDIDATES], key=rank))
     octave = any(abs(a / b - 2) < 0.06 for a, _ in top for b, _ in top)
     return TempoCandidates(top, octave)
 
 
 BEAT_METHOD = Method("ellis-dp-beats",
                      "beats tracked by dynamic programming (Ellis 2007) over a three-band spectral-flux onset envelope"
-                     " toward one global tempo, chosen among the tempo candidates by a log-normal prior around 120 BPM."
+                     " toward one global tempo, the first tempo candidate."
                      " Half- and double-time grids fit the onsets equally well; tempo changes and rubato bend the grid"
                      " only as far as the tightness penalty allows. tempoStability is low when the beat intervals vary"
                      " or when beats miss the onsets, as they do through a tempo change the grid cannot follow.")
