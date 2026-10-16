@@ -76,7 +76,7 @@ class MusicGuideTest(unittest.TestCase):
                                 mido.MetaMessage("set_tempo", tempo=600000)])
         song.tracks.append(track)
         song.save(midi_path)
-        data = self.evidence("--midi", midi_path)
+        data = self.evidence("--midi", midi_path, "--detail", "full")
         notes = [item for item in data["observations"] if item["property"] == "midi.note"]
         self.assertEqual(notes[0]["value"]["endBeat"], 1)
         tempos = [item for item in data["observations"] if item["property"] == "tempo"]
@@ -299,6 +299,55 @@ class MusicGuideTest(unittest.TestCase):
         self.assertFalse(any(item["code"] == "no_mixdown" for item in with_mix["diagnostics"]))
         self.mix.unlink()
         self.assertEqual(self.run_cli("--midi", midi_path).returncode, 2)
+
+    def test_midi_summary_describes_each_track(self):
+        keys = [mido.MetaMessage("track_name", name="Keys"),
+                mido.Message("note_on", note=50, velocity=60),
+                mido.Message("note_on", note=54, velocity=100),
+                mido.Message("note_off", note=50, time=480),
+                mido.Message("note_off", note=54, time=480),
+                mido.Message("note_on", note=57, velocity=80),
+                mido.Message("note_off", note=57, time=480)]
+        drums = [mido.Message("note_on", channel=9, note=36, velocity=127, time=960),
+                 mido.Message("note_off", channel=9, note=36, time=240)]
+        path = self.write_midi("summary.mid", [mido.MetaMessage("track_name", name="Conductor")], keys, drums)
+        data = self.evidence("--midi", path, mixdown=False)
+        self.assertFalse(any(item["property"] == "midi.note" for item in data["observations"]))
+        summaries = {item["scope"]: item for item in data["observations"] if item["property"] == "midi.track_summary"}
+        self.assertEqual(sorted(summaries), ["midi_track:1", "midi_track:2"])
+        zeros = dict.fromkeys(["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"], 0)
+        self.assertEqual(summaries["midi_track:1"]["value"], {
+            "noteCount": 3,
+            "pitchMin": {"midi": 50, "name": "D3"}, "pitchMax": {"midi": 57, "name": "A3"},
+            "pitchClassCounts": {**zeros, "D": 1, "F#": 1, "A": 1},
+            "pitchClassBeats": {**zeros, "D": 1, "F#": 2, "A": 1},
+            "velocityMin": 60, "velocityMax": 100, "velocityMean": 80,
+            "startBeat": 0, "endBeat": 3, "maxPolyphony": 2, "channels": [0],
+        })
+        drum = summaries["midi_track:2"]["value"]
+        self.assertEqual((drum["channels"], drum["startBeat"], drum["endBeat"], drum["pitchMin"]["name"]),
+                         ([9], 2, 2.5, "C2"))
+        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "midi.note_count"), 4)
+        full = self.evidence("--midi", path, "--detail", "full", mixdown=False)
+        self.assertEqual(len([item for item in full["observations"] if item["property"] == "midi.note"]), 4)
+        self.assertEqual(len([item for item in full["observations"] if item["property"] == "midi.track_summary"]), 2)
+
+    def test_summary_detail_keeps_large_midi_output_small(self):
+        track = []
+        for index in range(3000):
+            track.extend([mido.Message("note_on", note=48 + index % 24, velocity=64 + index % 32),
+                          mido.Message("note_off", note=48 + index % 24, time=120)])
+        path = self.write_midi("large.mid", track)
+        summary = self.run_cli("--midi", path, mixdown=False)
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertLess(len(summary.stdout.encode()), 30 * 1024)
+        self.assertEqual(next(item["value"] for item in json.loads(summary.stdout)["observations"]
+                              if item["property"] == "midi.note_count"), 3000)
+        full = self.evidence("--midi", path, "--detail", "full", mixdown=False)
+        notes = [item["value"] for item in full["observations"] if item["property"] == "midi.note"]
+        self.assertEqual(len(notes), 3000)
+        self.assertEqual(notes[-1]["endBeat"], 750)
+        self.assertEqual(self.run_cli("--midi", path, "--detail", "everything", mixdown=False).returncode, 2)
 
 
 if __name__ == "__main__":

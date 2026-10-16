@@ -6,7 +6,7 @@ from pathlib import Path
 
 from defusedxml import ElementTree as ET
 
-from ..model import Evidence
+from ..model import Detail, Evidence
 from .common import MAX_XML_BYTES, MAX_ZIP_BYTES, MAX_ZIP_ENTRIES, _finite_number
 
 
@@ -18,7 +18,7 @@ def _child(parent: ET.Element, name: str) -> ET.Element | None:
     return next((item for item in parent if _local(item.tag) == name), None)
 
 
-def dawproject(path: Path, source_id: str, evidence: Evidence) -> None:
+def dawproject(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
         if len(entries) > MAX_ZIP_ENTRIES or sum(item.file_size for item in entries) > MAX_ZIP_BYTES:

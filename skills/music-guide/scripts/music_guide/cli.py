@@ -14,7 +14,7 @@ from defusedxml.common import DefusedXmlException
 
 from .adapters import audio, dawproject, midi, solna
 from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES, _read_bounded
-from .model import Diagnostic, Evidence, Source, detect_conflicts
+from .model import Detail, Diagnostic, Evidence, Source, detect_conflicts
 
 ADAPTERS = {
     "mixdown": audio.audio,
@@ -67,7 +67,8 @@ def _merge(target: Evidence, staged: Evidence) -> None:
     target.diagnostics.extend(staged.diagnostics)
 
 
-def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None) -> Evidence:
+def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None,
+          detail: Detail = "summary") -> Evidence:
     evidence = Evidence(limitations=[
         "WAV sample peak is not true peak; RMS is not LUFS.",
         "MIDI, SOLNA and DAWproject describe stored intent, not rendered sound.",
@@ -102,7 +103,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
             if role == "stem":
                 audio.audio(path, source_id, staged, scope=f"stem:{source_id}")
             else:
-                ADAPTERS[role](path, source_id, staged)
+                ADAPTERS[role](path, source_id, staged, detail)
             _merge(evidence, staged)
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, EOFError,
                 sf.LibsndfileError, zipfile.BadZipFile, ET.ParseError, DefusedXmlException,
@@ -133,13 +134,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dawproject", action="append", type=Path, default=[])
     parser.add_argument("--project", action="append", type=Path, default=[], help="Unsupported native project to inventory")
     parser.add_argument("--declarations", type=Path, help="Optional JSON array of user-declared facts")
+    parser.add_argument("--detail", choices=("summary", "full"), default="summary",
+                        help="summary (default) reports one summary per note track; full also lists every note")
     args = parser.parse_args(argv)
     optionals = [(kind, path) for kind in ("stem", "midi", "solna", "dawproject", "project")
                  for path in getattr(args, kind)]
     if args.mixdown is None and not optionals:
         parser.error("supply at least one input: --mixdown, --stem, --midi, --solna, --project or --dawproject")
     try:
-        result = build(args.mixdown, optionals, args.declarations)
+        result = build(args.mixdown, optionals, args.declarations, args.detail)
         print(json.dumps(result.as_json(), ensure_ascii=False, allow_nan=False, indent=2))
         return 0
     except ValueError as error:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from ..model import Evidence
+from ..model import Detail, Evidence
 from .common import MAX_JSON_BYTES, _read_bounded, _finite_number
 
-def solna(path: Path, source_id: str, evidence: Evidence) -> None:
+def solna(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
     def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, value in pairs:

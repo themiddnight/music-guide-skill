@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 Provenance = Literal["measured", "extracted", "inferred", "user_declared"]
 Confidence = Literal["high", "medium", "low"]
+Detail = Literal["summary", "full"]
 
 
 @dataclass

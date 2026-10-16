@@ -2,10 +2,11 @@ from __future__ import annotations
 import io
 from pathlib import Path
 import mido
-from ..model import Diagnostic, Evidence
+from ..model import Detail, Diagnostic, Evidence
+from ..notes import Note, summarize_notes
 from .common import MAX_MIDI_BYTES, _read_bounded
 
-def midi(path: Path, source_id: str, evidence: Evidence) -> None:
+def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
     raw = _read_bounded(path, MAX_MIDI_BYTES)
     song = mido.MidiFile(file=io.BytesIO(raw))
     if song.type not in (0, 1):
@@ -19,6 +20,7 @@ def midi(path: Path, source_id: str, evidence: Evidence) -> None:
     for track_index, track in enumerate(song.tracks):
         tick = 0
         pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        notes: list[Note] = []
         for event_index, msg in enumerate(track):
             tick += msg.time
             locator = f"track={track_index};event={event_index};tick={tick}"
@@ -42,15 +44,17 @@ def midi(path: Path, source_id: str, evidence: Evidence) -> None:
                 starts = pending.get((msg.channel, msg.note), [])
                 if starts:
                     start_tick, velocity = starts.pop(0)
-                    note_count += 1
-                    evidence.add(source_id, "midi.note", {
-                        "pitch": msg.note, "channel": msg.channel, "velocity": velocity,
-                        "startTick": start_tick, "endTick": tick,
-                        "startBeat": start_tick / ticks_per_beat,
-                        "endBeat": tick / ticks_per_beat,
-                    }, "MIDI_note", f"midi_track:{track_index}", "midi_ticks",
-                        f"track={track_index};ticks={start_tick}-{tick}", "mido",
-                        "extracted", "high", "Paired stored note-on and note-off messages; no audible timing is inferred.")
+                    notes.append(Note(msg.note, velocity, start_tick / ticks_per_beat,
+                                      tick / ticks_per_beat, msg.channel))
+                    if detail == "full":
+                        evidence.add(source_id, "midi.note", {
+                            "pitch": msg.note, "channel": msg.channel, "velocity": velocity,
+                            "startTick": start_tick, "endTick": tick,
+                            "startBeat": start_tick / ticks_per_beat,
+                            "endBeat": tick / ticks_per_beat,
+                        }, "MIDI_note", f"midi_track:{track_index}", "midi_ticks",
+                            f"track={track_index};ticks={start_tick}-{tick}", "mido",
+                            "extracted", "high", "Paired stored note-on and note-off messages; no audible timing is inferred.")
                 else:
                     evidence.diagnostics.append(Diagnostic("unmatched_note_off", "warning",
                         f"Unmatched MIDI note-off at {locator}.", source_id))
@@ -58,7 +62,10 @@ def midi(path: Path, source_id: str, evidence: Evidence) -> None:
             if starts:
                 evidence.diagnostics.append(Diagnostic("unmatched_note_on", "warning",
                     f"{len(starts)} MIDI note(s) in track {track_index} have no note-off.", source_id))
+        if notes:
+            note_count += len(notes)
+            evidence.add(source_id, "midi.track_summary", summarize_notes(notes), "note_summary",
+                         f"midi_track:{track_index}", "static", f"track={track_index}", "mido+summarize_notes",
+                         "extracted", "high", "Aggregated from paired stored notes; beats are quarter notes, not audible timing.")
     evidence.add(source_id, "midi.note_count", note_count, "count", "project", "static",
                  "whole file", "mido", "extracted", "high", "Count of paired MIDI note events.")
-
-
