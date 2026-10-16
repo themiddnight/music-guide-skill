@@ -148,6 +148,7 @@ class MusicGuideTest(unittest.TestCase):
         data = self.evidence("--project", native)
         self.assertEqual(data["sources"][1]["status"], "unsupported")
         self.assertIsNone(data["sources"][1]["sha256"])
+        self.assertEqual(self.evidence("--project", self.dir / "missing.logicx")["sources"][1]["status"], "error")
         target = self.dir / "outside" / "music-guide"
         install = subprocess.run([sys.executable, str(ROOT / "install.py"), "--dest", str(target)],
                                  text=True, capture_output=True)

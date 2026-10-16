@@ -82,6 +82,10 @@ def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path |
         evidence.sources.append(source)
         try:
             if role == "project":
+                if not path.exists():
+                    raise ValueError("source does not exist")
+                if not (path.is_file() or path.is_dir()):
+                    raise ValueError("source is not a regular file or package directory")
                 if path.is_file() and path.stat().st_size <= 64 * 1024**2:
                     source.sha256 = _hash(path)
                 source.status = "unsupported"
