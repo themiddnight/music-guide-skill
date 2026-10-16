@@ -148,5 +148,99 @@ class FiniteValueTest(CliCase):
         self.assertIn("magnitude", result.stderr)
 
 
+def sparse_wav(path: Path, frames: int, rate: int) -> None:
+    """An 8-bit mono WAV whose header and length agree but whose body is a hole in the file."""
+    header = (b"RIFF" + struct.pack("<I", 36 + frames) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate, 1, 8) +
+              b"data" + struct.pack("<I", frames))
+    with path.open("wb") as stream:
+        stream.write(header)
+        stream.truncate(len(header) + frames)
+
+
+class AudioBoundsTest(CliCase):
+    def test_overlong_audio_is_rejected_before_decoding(self):
+        rate = 8000
+        long = self.dir / "long.wav"
+        sparse_wav(long, 6 * 3600 * rate + 1, rate)
+        self.assertTrue(sf.info(long).frames > 6 * 3600 * rate)
+        data = self.evidence("--stem", long)
+        self.assert_optional_error(data)
+        self.assertIn("6 hours", next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error"))
+
+    def test_frame_count_is_enforced_while_decoding_too(self):
+        from music_guide.adapters import audio
+
+        class Liar:
+            frames, samplerate, channels = 0, 8000, 1
+
+            def blocks(self, **_):
+                for _ in range(3):
+                    yield np.full((8000, 1), 0.1)
+        with mock.patch.object(audio, "MAX_AUDIO_SECONDS", 2):
+            with self.assertRaisesRegex(ValueError, "hours|longer"):
+                audio._measure(Liar())
+
+    def test_block_size_shrinks_as_channels_grow(self):
+        from music_guide.adapters.audio import block_frames
+        self.assertEqual(block_frames(2), 65536)
+        self.assertLess(block_frames(256), block_frames(2))
+        self.assertLessEqual(block_frames(1024) * 1024, 2 ** 20)
+
+    def test_many_channel_audio_stays_within_memory(self):
+        for channels, frames in ((256, 70000), (1024, 5000)):
+            with self.subTest(channels=channels):
+                wide = self.dir / f"wide{channels}.wav"
+                sf.write(wide, np.zeros((frames, channels), dtype="int16") + 1000, 48000, subtype="PCM_16")
+                script = ("import resource, sys, platform\n"
+                          f"sys.path.insert(0, {str(SKILL / 'scripts')!r})\n"
+                          "from pathlib import Path\n"
+                          "from music_guide.adapters import audio\n"
+                          "from music_guide.model import Evidence\n"
+                          f"audio.audio(Path({str(wide)!r}), 's1', Evidence())\n"
+                          "peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+                          "print(peak if platform.system() == 'Darwin' else peak * 1024)\n")
+                result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertLess(int(result.stdout), 600 * 1024 * 1024)
+
+
+class AudioEstimateReasonTest(CliCase):
+    def facts(self, samples, rate=48000):
+        path = self.dir / "short.wav"
+        sf.write(path, samples, rate, subtype="FLOAT")
+        data = self.evidence("--mixdown", path, mixdown=False)
+        return {item["property"]: item for item in data["observations"]}
+
+    def test_one_sample_file_is_not_called_silence(self):
+        facts = self.facts(np.array([0.5], dtype="float32"))
+        self.assertIsNone(facts["audio.band_energy"]["value"])
+        self.assertNotIn("silence", facts["audio.band_energy"]["confidenceReason"])
+        self.assertIn("too short", facts["audio.band_energy"]["confidenceReason"])
+        self.assertNotIn("silence", facts["audio.spectral_centroid"]["confidenceReason"])
+
+    def test_real_silence_keeps_its_reason(self):
+        facts = self.facts(np.zeros(8, dtype="float32"))
+        self.assertIn("digital silence", facts["audio.band_energy"]["confidenceReason"])
+
+    def test_stereo_correlation_survives_extreme_scales(self):
+        from music_guide.analysis import StereoMeter
+        for scale in (1e-155, 1e-100, 1.0, 1e140):
+            with self.subTest(scale=scale):
+                meter = StereoMeter()
+                block = np.full((8, 2), scale)
+                meter.feed(block)
+                correlation, _ = meter.result()
+                self.assertAlmostEqual(correlation, 1.0, places=9)
+        meter = StereoMeter()
+        meter.feed(np.array([[1e-155, -1e-155]] * 4))
+        self.assertAlmostEqual(meter.result()[0], -1.0, places=9)
+
+    def test_tiny_stereo_file_reports_correlation_through_the_cli(self):
+        path = self.dir / "tiny.wav"
+        sf.write(path, np.full((64, 2), 1e-155), 48000, subtype="DOUBLE")
+        facts = {item["property"]: item for item in self.evidence("--mixdown", path, mixdown=False)["observations"]}
+        self.assertAlmostEqual(facts["audio.stereo_correlation"]["value"], 1.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

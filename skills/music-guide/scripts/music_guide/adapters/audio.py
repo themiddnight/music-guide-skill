@@ -15,6 +15,10 @@ from .common import MAX_AUDIO_BYTES
 
 LOSSY_SUBTYPES = {"MPEG_LAYER_I", "MPEG_LAYER_II", "MPEG_LAYER_III", "VORBIS", "OPUS"}
 BLOCK_FRAMES = 65536
+# Each block is held several times over by the meters, so wide files read fewer frames at once.
+BLOCK_SAMPLES = 2 ** 20
+MIN_BLOCK_FRAMES = 1024
+MAX_AUDIO_SECONDS = 6 * 3600
 # +120 dBFS. Real recordings never get near it, and every squared sum stays finite below it.
 MAX_SAMPLE_MAGNITUDE = 1e6
 
@@ -31,6 +35,14 @@ class Fact:
     time_domain: str = "static"
 
 
+def block_frames(channels: int) -> int:
+    return max(MIN_BLOCK_FRAMES, min(BLOCK_FRAMES, BLOCK_SAMPLES // channels))
+
+
+def _too_long() -> ValueError:
+    return ValueError(f"audio is longer than the {MAX_AUDIO_SECONDS // 3600} hours this tool measures")
+
+
 def _decibels(value: float) -> float | None:
     return None if value == 0 else 20 * math.log10(value)
 
@@ -45,6 +57,8 @@ def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown"
     with file:
         if file.channels <= 0 or file.samplerate <= 0:
             raise ValueError("audio file has no readable channels or sample rate")
+        if file.frames > MAX_AUDIO_SECONDS * file.samplerate:
+            raise _too_long()
         try:
             measured = _measure(file)
         except (sf.LibsndfileError, RuntimeError) as error:
@@ -62,7 +76,7 @@ def _measure(file: sf.SoundFile) -> dict:
     features = MusicFeatures(rate)
     peak = sum_squares = 0.0
     frames = threshold_count = 0
-    for block in file.blocks(blocksize=BLOCK_FRAMES, dtype="float64", always_2d=True):
+    for block in file.blocks(blocksize=block_frames(channels), dtype="float64", always_2d=True):
         if not np.isfinite(block).all():
             raise ValueError("audio contains nonfinite samples")
         absolute = np.abs(block)
@@ -74,6 +88,8 @@ def _measure(file: sf.SoundFile) -> dict:
         if not math.isfinite(sum_squares):
             raise ValueError("audio energy exceeds finite measurement range")
         frames += len(block)
+        if frames > MAX_AUDIO_SECONDS * rate:
+            raise _too_long()
         threshold_count += int(np.count_nonzero(absolute >= 1.0))
         for meter in (loudness, true_peak, spectrum, stereo, features):
             if meter is not None:
@@ -180,7 +196,8 @@ LOUDNESS_PROPERTIES = (("audio.integrated_loudness", "LUFS"), ("audio.max_moment
 def _balance_facts(measured: dict, confidence: Confidence, note: str) -> list[Fact]:
     bands, centroid = measured["bands"], measured["centroid"]
     spectral = "long-term-spectrum"
-    silent = "Undefined for digital silence."
+    silent = ("Undefined for digital silence." if measured["peak"] == 0 else
+              "Undefined because the signal is too short or too quiet for a windowed spectrum.")
     facts = [
         Fact("audio.band_energy", bands, "dB_rel", spectral,
              (silent if bands is None else "Share of total energy per band in dB (sub <60 Hz, low 60-250 Hz,"

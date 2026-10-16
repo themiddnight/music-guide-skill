@@ -103,7 +103,10 @@ class StereoMeter:
         self.side += float(side @ side)
 
     def result(self) -> tuple[float | None, float | None]:
-        correlation = self.cross / math.sqrt(self.left * self.right) if self.left > 0 and self.right > 0 else None
+        correlation = None
+        if self.left > 0 and self.right > 0:
+            # Two square roots, not one over the product, so a very quiet or loud pair neither underflows nor overflows.
+            correlation = max(-1.0, min(1.0, self.cross / (math.sqrt(self.left) * math.sqrt(self.right))))
         ratio = 10 * math.log10(self.side / self.mid) if self.side > 0 and self.mid > 0 else None
         return correlation, ratio
 
