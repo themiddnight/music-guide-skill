@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import dawproject, lmms, logic, midi, solna
+from .adapters import ardour, dawproject, lmms, logic, midi, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -73,7 +73,7 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Export a WAV mixdown and stems, and use File > Export > MIDI file."),
     ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
                   "Export a DAWproject (Studio One 6.5 or later), or a mixdown, stems and MIDI."),
-    ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", MAX_ZIP_BYTES, _signature(b"<", text=True), None,
+    ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", ardour.MAX_ARDOUR_BYTES, _signature(b"<?xml", b"<Session", text=True), ardour.ardour,
                   "Export a mixdown and stems with Session > Export, and MIDI regions as MIDI files."),
     ProjectFormat("lmms-project", "LMMS project", (".mmp", ".mmpz"), "file", lmms.MAX_LMMS_BYTES, lmms.detect, lmms.lmms,
                   "Export a WAV mixdown with File > Export and the tracks with File > Export MIDI."),

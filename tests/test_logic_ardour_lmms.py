@@ -385,3 +385,197 @@ class LmmsProjectTest(ProjectCliCase):
         zero = self.dir / "zero.mmpz"
         zero.write_bytes((0).to_bytes(4, "big") + zlib.compress(b"<a/>"))
         self.assertEqual(self.project(zero)["sources"][0]["status"], "error")
+
+
+def ardour_session(version, tempo_map, locations="", routes="", playlists="", sources="", rate=48000,
+                   program="Ardour 6.9"):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Session version="{version}" name="demo" sample-rate="{rate}" id-counter="99">
+  <ProgramVersion created-with="Ardour 5.12" modified-with="{program}"/>
+  <Sources>{sources}</Sources>
+  <Regions/>
+  <Locations>{locations}</Locations>
+  <Routes>{routes}</Routes>
+  <Playlists>{playlists}</Playlists>
+  <UnusedPlaylists/>
+  {tempo_map}
+</Session>"""
+
+
+ARDOUR6_TEMPO = """<TempoMap>
+    <Tempo pulse="0" frame="0" movable="0" lock-style="AudioTime" beats-per-minute="120.000000" note-type="4.000000"
+           clamped="0" end-beats-per-minute="120.000000" active="1" locked-to-meter="0"/>
+    <Tempo pulse="8" frame="480000" movable="1" lock-style="MusicTime" beats-per-minute="90.000000" note-type="4.000000"
+           clamped="0" end-beats-per-minute="90.000000" active="1" locked-to-meter="0"/>
+    <Tempo pulse="9" frame="0" movable="1" lock-style="MusicTime" beats-per-minute="200.000000" note-type="4.000000"
+           clamped="0" end-beats-per-minute="200.000000" active="0" locked-to-meter="0"/>
+    <Meter pulse="0" frame="0" movable="0" lock-style="AudioTime" bbt="1|1|0" beat="0" note-type="4.000000" divisions-per-bar="4.000000"/>
+  </TempoMap>"""
+
+ARDOUR8_TEMPO = """<TempoMap superclocks-per-second="282240000">
+    <Tempos>
+      <Tempo npm="120" enpm="120" note-type="4" type="Constant" locked-to-meter="0" continuing="0" active="1" sclock="0" quarters="0:0" bbt="1|1|0" omega="0"/>
+      <Tempo npm="180" enpm="180" note-type="8" type="Constant" locked-to-meter="0" continuing="0" active="1" sclock="564480000" quarters="8:960" bbt="3|1|0" omega="0"/>
+    </Tempos>
+    <Meters>
+      <Meter note-value="4" divisions-per-bar="4" sclock="0" quarters="0:0" bbt="1|1|0"/>
+      <Meter note-value="8" divisions-per-bar="7" sclock="564480000" quarters="8:0" bbt="3|1|0"/>
+    </Meters>
+    <MusicTimes/>
+  </TempoMap>"""
+
+ARDOUR_ROUTES = """
+    <Route version="6000" id="1" name="Master" default-type="audio" active="1">
+      <PresentationInfo order="0" flags="MasterOut,OrderSet" color="1"/>
+      <Processor id="2" name="Amp" active="1" type="amp"/>
+    </Route>
+    <Route version="6000" id="10" name="Guitar &lt;ignore&gt;" default-type="audio" active="1" audio-playlist="100">
+      <PresentationInfo order="1" flags="AudioTrack,OrderSet" color="2"/>
+      <Processor id="11" name="ACE Reverb" active="1" type="lv2" unique-id="urn:ace"/>
+      <Processor id="12" name="Gain" active="1" type="luaproc"/>
+      <Processor id="13" name="Meter" active="1" type="meter"/>
+    </Route>
+    <Route version="6000" id="20" name="Keys" default-type="midi" active="0" midi-playlist="200">
+      <PresentationInfo order="2" flags="MidiTrack,OrderSet" color="3"/>
+      <Processor id="21" name="Helm" active="1" type="vst"/>
+    </Route>
+    <Route version="6000" id="30" name="Drum bus" default-type="audio" active="1">
+      <PresentationInfo order="3" flags="AudioBus,OrderSet" color="4"/>
+    </Route>
+    <Route version="6000" id="40" name="Monitor" default-type="audio" active="1">
+      <PresentationInfo order="4" flags="MonitorOut" color="5"/>
+    </Route>"""
+
+ARDOUR_PLAYLISTS = """
+    <Playlist id="100" name="Guitar" type="audio" orig-track-id="10"><Region name="g1"/><Region name="g2"/><Region name="g3"/></Playlist>
+    <Playlist id="200" name="Keys" type="midi" orig-track-id="20"><Region name="k1"/></Playlist>
+    <Playlist id="300" name="Guitar.1" type="audio" orig-track-id="10"><Region name="old"/></Playlist>"""
+
+ARDOUR_SOURCES = """
+    <Source name="Guitar-1.wav" type="audio" flags="" id="1" origin="/home/me/guitar take.wav"/>
+    <Source name="Guitar-1.wav" type="audio" flags="" id="2"/>
+    <Source name="Keys.mid" type="midi" flags="" id="3"/>"""
+
+
+class ArdourSessionTest(ProjectCliCase):
+    def write(self, name, text):
+        path = self.dir / name
+        path.write_text(text)
+        return path
+
+    def test_ardour6_flat_tempo_map_locations_routes_and_media(self):
+        locations = """
+          <Location id="1" name="session" start="0" end="960000" flags="IsSessionRange" locked="0"/>
+          <Location id="2" name="Verse" start="96000" end="96000" flags="IsMark" locked="0"/>
+          <Location id="3" name="Hidden" start="5" end="5" flags="IsMark,IsHidden" locked="0"/>
+          <Location id="4" name="Solo" start="48000" end="192000" flags="IsRangeMarker" locked="0"/>
+          <Location id="5" name="Loop" start="0" end="96000" flags="IsAutoLoop" locked="0"/>
+          <Location id="6" name="Xrun" start="10" end="10" flags="IsXrun" locked="0"/>"""
+        session = ardour_session(6000, ARDOUR6_TEMPO, locations, ARDOUR_ROUTES, ARDOUR_PLAYLISTS, ARDOUR_SOURCES)
+        data = self.project(self.write("demo.ardour", session))
+        source = data["sources"][0]
+        self.assertEqual((source["adapter"], source["status"]), ("ardour-session", "ok"))
+        self.assertEqual(self.values(data, "project.application"), ["Ardour 6.9"])
+        self.assertEqual(self.values(data, "ardour.session_version"), [6000])
+        self.assertEqual(self.values(data, "project.sample_rate"), [48000])
+        self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0, "bpm": 120}, {"beat": 32, "bpm": 90}]])
+        self.assertEqual(self.values(data, "tempo"), [])
+        self.assertEqual(self.values(data, "meter"), ["4/4"])
+        self.assertEqual(self.values(data, "project.marker"), [{"name": "Verse", "position": 2, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "ardour.session_range"), [{"name": "session", "start": 0, "end": 20, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "ardour.range"), [{"name": "Solo", "start": 1, "end": 4, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "ardour.loop_range"), [{"name": "Loop", "start": 0, "end": 2, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "project.track_count"), [5])
+        tracks = [item["value"] for item in data["observations"] if item["property"] == "project.track"]
+        self.assertEqual([(item["name"], item["kind"]) for item in tracks], [
+            ("Master", "master"), ("Guitar <ignore>", "audio"), ("Keys", "midi"), ("Drum bus", "group"), ("Monitor", "unknown")])
+        plugins = [(item["value"]["name"], item["scope"]) for item in data["observations"] if item["property"] == "project.plugin"]
+        self.assertEqual(plugins, [("ACE Reverb", "project_track:1"), ("Gain", "project_track:1"), ("Helm", "project_track:2")])
+        clips = {item["scope"]: item["value"] for item in data["observations"] if item["property"] == "project.clip_count"}
+        self.assertEqual(clips, {"project_track:1": 3, "project_track:2": 1})
+        routes = self.values(data, "ardour.route", "project_track:2")
+        self.assertEqual(routes, [{"defaultType": "midi", "flags": ["MidiTrack", "OrderSet"], "active": False}])
+        self.assertEqual(self.values(data, "project.media_reference"), [
+            {"basename": "Guitar-1.wav", "count": 2}, {"basename": "Keys.mid", "count": 1}])
+        self.assertTrue(any(item["code"] == "ardour_notes_not_read" for item in data["diagnostics"]))
+        self.assertFalse(data["conflicts"])
+        marker = next(item for item in data["observations"] if item["property"] == "project.marker")
+        self.assertEqual(marker["timeDomain"], "project_seconds")
+
+    def test_single_tempo_makes_static_claims_that_conflict_with_declarations(self):
+        single = """<TempoMap>
+            <Tempo pulse="0" frame="0" movable="0" lock-style="AudioTime" beats-per-minute="96.000000" note-type="4.000000" active="1"/>
+            <Meter pulse="0" frame="0" movable="0" lock-style="AudioTime" bbt="1|1|0" beat="0" note-type="4.000000" divisions-per-bar="3.000000"/>
+          </TempoMap>"""
+        path = self.write("single.ardour", ardour_session(6000, single))
+        declarations = self.dir / "declarations.json"
+        declarations.write_text(json.dumps([{"property": "tempo", "value": 100, "unit": "BPM", "scope": "project"},
+                                            {"property": "meter", "value": "3/4", "unit": "signature", "scope": "project"}]))
+        data = self.evidence("--project", path, "--declarations", declarations)
+        self.assertEqual(self.values(data, "tempo")[:1], [96])
+        self.assertEqual(self.values(data, "meter")[:1], ["3/4"])
+        self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
+
+    def test_ardour8_nested_tempo_map_with_timed_locations(self):
+        locations = """
+          <Location id="1" name="Intro" start="a282240000" end="a282240000" flags="IsMark" locked="0" timestamp="1" cue="0"/>
+          <Location id="2" name="Bar 3" start="b3840" end="b3840" flags="IsMark" locked="0" timestamp="1" cue="0"/>
+          <Location id="3" name="session" start="a0" end="a2822400000" flags="IsSessionRange" locked="0" timestamp="1" cue="0"/>"""
+        data = self.project(self.write("new.ardour", ardour_session(8000, ARDOUR8_TEMPO, locations, program="Ardour 8.12.0")))
+        self.assertEqual(self.values(data, "project.application"), ["Ardour 8.12.0"])
+        self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0, "bpm": 120}, {"beat": 8.5, "bpm": 90}]])
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertEqual(self.values(data, "ardour.meter_map"), [[{"beat": 0, "meter": "4/4"}, {"beat": 8, "meter": "7/8"}]])
+        meter_map = next(item for item in data["observations"] if item["property"] == "ardour.meter_map")
+        self.assertEqual(meter_map["timeDomain"], "project_beats")
+        markers = [(item["value"], item["timeDomain"]) for item in data["observations"] if item["property"] == "project.marker"]
+        self.assertEqual(markers, [({"name": "Intro", "position": 1, "unit": "seconds"}, "project_seconds"),
+                                   ({"name": "Bar 3", "position": 2, "unit": "beats"}, "project_beats")])
+        self.assertEqual(self.values(data, "ardour.session_range"), [{"name": "session", "start": 0, "end": 10, "unit": "seconds"}])
+
+    def test_ardour4_style_start_positions(self):
+        old = """<TempoMap>
+            <Tempo start="1|1|0" beats-per-minute="120.000000" note-type="4.000000" movable="0"/>
+            <Meter start="1|1|0" beats-per-bar="4.000000" note-type="4.000000" movable="0"/>
+          </TempoMap>"""
+        data = self.project(self.write("old.ardour", ardour_session(3000, old)))
+        self.assertEqual(self.values(data, "tempo"), [120])
+        self.assertEqual(self.values(data, "meter"), ["4/4"])
+        several = old.replace("</TempoMap>", '<Tempo start="5|1|0" beats-per-minute="90.000000" note-type="4.000000" movable="1"/></TempoMap>')
+        data = self.project(self.write("old2.ardour", ardour_session(3000, several)))
+        self.assertEqual(self.values(data, "tempo"), [])
+        self.assertEqual(self.values(data, "project.tempo_map"), [])
+        self.assertTrue(any(item["code"] == "tempo_positions_unreadable" for item in data["diagnostics"]))
+
+    def test_missing_rates_skip_locations_with_a_warning_not_a_default(self):
+        locations = '<Location id="1" name="A" start="96000" end="96000" flags="IsMark"/>'
+        session = ardour_session(6000, ARDOUR6_TEMPO, locations).replace(' sample-rate="48000"', "")
+        data = self.project(self.write("norate.ardour", session))
+        self.assertEqual(self.values(data, "project.marker"), [])
+        self.assertEqual(self.values(data, "project.sample_rate"), [])
+        self.assertTrue(any(item["code"] == "locations_skipped" for item in data["diagnostics"]))
+
+    def test_malformed_and_unsafe_sessions_are_errors(self):
+        good = ardour_session(6000, ARDOUR6_TEMPO)
+        cases = {
+            "wrong-root.ardour": '<?xml version="1.0"?><Project/>',
+            "no-version.ardour": good.replace('version="6000" ', ""),
+            "bad-tempo.ardour": good.replace('beats-per-minute="120.000000"', 'beats-per-minute="fast"'),
+            "zero-tempo.ardour": good.replace('beats-per-minute="120.000000"', 'beats-per-minute="0"'),
+            "bad-meter.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="2.5"'),
+            "bad-rate.ardour": good.replace('sample-rate="48000"', 'sample-rate="-1"'),
+            "bad-position.ardour": ardour_session(6000, ARDOUR6_TEMPO, '<Location name="x" start="zz" end="1" flags="IsMark"/>'),
+            "entities.ardour": good.replace("<Sources>", '<!DOCTYPE s [<!ENTITY x "y">]><Sources>', 1),
+            "external-dtd.ardour": good.replace("<Session", '<!DOCTYPE Session SYSTEM "file:///etc/passwd"><Session', 1),
+            "truncated.ardour": good[:300],
+            "html.ardour": "<html><body>hi</body></html>",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                self.failed(self.write(name, text))
+        bomb = self.dir / "big.ardour"
+        bomb.write_bytes(b"<?xml version='1.0'?><Session version='1'>" + b" " * (33 * 1024 * 1024) + b"</Session>")
+        self.assertIn("byte limit", self.failed(bomb))
+        text_file = self.write("plain.ardour", "just text")
+        self.assertIn("does not match the Ardour session", next(
+            item["message"] for item in self.project(text_file)["diagnostics"] if item["code"] == "optional_source_error"))

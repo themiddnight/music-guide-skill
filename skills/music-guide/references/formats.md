@@ -30,7 +30,7 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 | REAPER | `.rpp` | Inventory; render stems and export MIDI |
 | FL Studio | `.flp` | Inventory; export stems and MIDI |
 | Studio One | `.song` | Inventory; export DAWproject (6.5+) or stems and MIDI |
-| Ardour | `.ardour` | Inventory; export stems and MIDI |
+| Ardour | `.ardour` | Parsed: tempo map, meter, locations, routes, plugins, region counts |
 | LMMS | `.mmp`, `.mmpz` | Parsed: tempo, meter, tracks, plugins, note summaries |
 | AAF, OMF | `.aaf`, `.omf` | Inventory |
 | MusicXML | `.musicxml`, `.mxl` | Inventory; export MIDI |
@@ -61,6 +61,18 @@ LMMS parses a file as XML first and falls back to `qUncompress`, so the adapter 
 - Every `track` in the song container and, for beat/bassline tracks, every track in the nested pattern store becomes a `project.track` (type 0 instrument, 1 beat/bassline as group, 2 sample as audio, others unknown); `lmms.track_type` carries the type code, label and container. `project.plugin` lists instrument and effect names from tracks and from the mixer, `project.clip_count` counts the pattern, sample, beat/bassline and automation clips of a track, and `project.media_reference` lists `src` basenames of sample clips and instruments.
 - Notes come from `note` elements in MIDI clips (`pattern`, or `midiclip` in 1.3). Ticks convert to quarter notes at 48 ticks per quarter (192 per whole note in every meter). Pitch is `key + 12`, so LMMS key 57 is A4, as in the LMMS MIDI export; base-note and master-pitch transposition are not applied. Velocity is `vol * 127 / 200`. A negative length marks a beat step note and is taken as its magnitude. Positions inside a nested beat/bassline pattern are local to that pattern, not placed on the song timeline.
 - Not extracted: automation values, the placement of beat/bassline clips on the timeline, sample rate (LMMS keeps it in its settings), instrument settings, and any embedded `data`.
+
+## Ardour sessions
+
+Sources: Ardour 5.12, 6.9 and 8.12 `session_state.cc`, `tempo.cc` and `libs/temporal/tempo.cc`, `location.cc`, `route.cc`, `playlist.cc`, `plugin_insert.cc` and `temporal/timeline.cc`, and the [Ardour session-file notes](https://git.ardour.org/ardour/manual/raw/branch/master/include/whats-in-a-session.html).
+
+The adapter reads the session XML only (32 MiB limit, no DTD or entities). It never opens the session's audio, MIDI or plugin files. Three `TempoMap` layouts are read. Ardour 4 and older use flat `Tempo` and `Meter` children placed by `start="1|1|0"` (`beats-per-bar` names the meter numerator). Ardour 5 and 6 add whole-note `pulse` positions. Ardour 7 and later use `Tempos` and `Meters` lists with `quarters="beats:ticks"` positions and `npm`/`note-type` tempos. Inactive tempos are skipped. Tempo is converted to quarter notes per minute as `npm * 4 / note-type`.
+
+- `project.application` is `ProgramVersion/@modified-with` (or `created-with`), `project.sample_rate` is `Session/@sample-rate`, and `ardour.session_version` is the file version.
+- `project.tempo_map` lists every active tempo start. A single tempo also gives a static `tempo`, a single meter gives a static `meter`, and several meters give `ardour.meter_map`. Ramps are reduced to their starting tempo. A session with several tempos but no readable positions gets the warning `tempo_positions_unreadable` and no tempo claim.
+- `Location` marks become `project.marker`; session, loop and range locations become `ardour.session_range`, `ardour.loop_range` and `ardour.range`. Positions are sample counts (divided by the session rate), `a<superclock>` (divided by the tempo map's superclock rate) or `b<ticks>` (1920 ticks per quarter). A location whose rate is missing is skipped with the warning `locations_skipped`, never defaulted.
+- Each `Route` is a `project.track`: master, audio, MIDI or bus from `PresentationInfo/@flags` (the monitor section is `unknown`); `ardour.route` keeps the type, flags and active state. `lv2`, `ladspa`, `luaproc`, VST and AudioUnit processors become `project.plugin`; built-in processors do not. `project.clip_count` is the region count of the track's current playlist; unused playlists are not counted. `project.media_reference` lists `Source` names.
+- Not extracted: MIDI notes (they live in separate `.mid` source files; the info diagnostic `ardour_notes_not_read` says so), automation, region positions, VCAs, and tempo ramp shapes.
 
 ## Add an adapter
 

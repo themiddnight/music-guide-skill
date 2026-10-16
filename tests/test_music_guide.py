@@ -511,7 +511,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.rpp", b"\xef\xbb\xbf<REAPER_PROJECT 0.1", "reaper-rpp", "MIDI"),
             ("song.flp", b"FLhd\x06\x00", "fl-studio-flp", "MIDI file"),
             ("song.song", zipped, "studio-one-song", "DAWproject"),
-            ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),
             ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
             ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
