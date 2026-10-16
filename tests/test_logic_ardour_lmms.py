@@ -340,7 +340,7 @@ class LmmsProjectTest(ProjectCliCase):
             self.assertEqual((lead["startBeat"], lead["endBeat"]), (4, 17))
             kick = next(item["value"] for item in data["observations"]
                         if item["property"] == "project.track_notes" and item["scope"] == "project_track:1")
-            self.assertEqual((kick["noteCount"], kick["velocityMin"], kick["velocityMax"], kick["endBeat"]), (2, 64, 127, 6))
+            self.assertEqual((kick["noteCount"], kick["velocityMin"], kick["velocityMax"], kick["endBeat"]), (2, 64, 127, 2.25))
             self.assertFalse(any(item["property"] == "project.note" for item in data["observations"]))
             self.assertTrue(any(item["code"] == "negative_note_length" for item in data["diagnostics"]))
             self.assertTrue(any(item["code"] == "lmms_pitch_convention" for item in data["diagnostics"]))
@@ -352,6 +352,65 @@ class LmmsProjectTest(ProjectCliCase):
         self.assertEqual([(note["pitch"], note["velocity"], note["startBeat"], note["endBeat"]) for note in lead],
                          [(69, 64, 4, 5), (72, 32, 5, 7), (74, 64, 16, 17)])
         self.assertEqual(len([item for item in data["observations"] if item["property"] == "project.note"]), 5)
+
+    def roots(self, version, creatorversion="1.3.0", notes=""):
+        attrs = (f' version="{version}"' if version is not None else "") + (
+            f' creatorversion="{creatorversion}"' if creatorversion is not None else "")
+        return (f'<?xml version="1.0"?><lmms-project{attrs} type="song" creator="LMMS"><head bpm="120"/><song>'
+                f'<trackcontainer type="song"><track type="0" name="Lead"><instrumenttrack vol="100"/>'
+                f'<pattern type="1" pos="0" len="192">{notes}</pattern></track></trackcontainer></song></lmms-project>')
+
+    def summary(self, data):
+        return next(item for item in data["observations"] if item["property"] == "project.track_notes")
+
+    def test_key_convention_follows_the_file_version(self):
+        note = '<note key="{key}" pos="0" len="48" vol="100"/>'
+        cases = (("30", "1.3.0", 69, "high"), ("20", "1.3.0", 69, "high"), ("19", "1.3.0", 57, "high"),
+                 ("1.0", "1.2.2", 57, "high"), (None, "1.2.2", 57, "high"))
+        for version, creator, key, confidence in cases:
+            with self.subTest(version=version, creator=creator):
+                data = self.project(self.write("v.mmp", self.roots(version, creator, note.format(key=key))))
+                summary = self.summary(data)
+                self.assertEqual(summary["value"]["pitchMin"], {"midi": 69, "name": "A4"})
+                self.assertEqual(summary["confidence"], confidence)
+                self.assertIn("file version", summary["confidenceReason"])
+                self.assertEqual(self.values(data, "lmms.pitch_convention")[0]["keyOffset"], 0 if version == "30" or version == "20" else 12)
+
+    def test_unknown_file_version_states_its_assumption_at_lower_confidence(self):
+        note = '<note key="57" pos="0" len="48" vol="100"/>'
+        for version, creator in ((None, None), ("abc", None)):
+            with self.subTest(version=version):
+                data = self.project(self.write("u.mmp", self.roots(version, creator, note)))
+                summary = self.summary(data)
+                self.assertEqual(summary["confidence"], "low")
+                self.assertIn("assumed", summary["confidenceReason"])
+                self.assertEqual(summary["value"]["pitchMin"]["midi"], 69)
+
+    def test_notes_outside_the_midi_range_are_skipped_and_counted(self):
+        notes = ('<note key="57" pos="0" len="48" vol="100"/><note key="116" pos="0" len="48" vol="100"/>'
+                 '<note key="127" pos="0" len="48" vol="100"/><note key="-3" pos="0" len="48" vol="100"/>')
+        data = self.project(self.write("old.mmp", self.roots("1.0", "1.2.2", notes)))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.summary(data)["value"]["noteCount"], 2)
+        skipped = next(item for item in data["diagnostics"] if item["code"] == "lmms_notes_out_of_range")
+        self.assertIn("2 note", skipped["message"])
+        modern = self.project(self.write("new.mmp", self.roots("30", "1.3.0", notes)))
+        self.assertEqual(self.summary(modern)["value"]["noteCount"], 3)
+        self.assertIn("1 note", next(item for item in modern["diagnostics"] if item["code"] == "lmms_notes_out_of_range")["message"])
+
+    def test_step_notes_follow_lmms_own_upgrade_rule_or_are_excluded(self):
+        notes = ('<note key="57" pos="48" len="-192" vol="100"/><note key="57" pos="0" len="96" vol="100"/>')
+        data = self.project(self.write("old.mmp", self.roots("1.0", "1.2.2", notes)), "--detail", "full")
+        written = sorted((item["value"]["startBeat"], item["value"]["endBeat"]) for item in data["observations"]
+                         if item["property"] == "project.note")
+        self.assertEqual(written, [(0, 2), (1, 1.25)])
+        message = next(item for item in data["diagnostics"] if item["code"] == "negative_note_length")["message"]
+        self.assertIn("1 note", message)
+        self.assertIn("192/16", message)
+        modern = self.project(self.write("new.mmp", self.roots("30", "1.3.0", notes)))
+        self.assertEqual(self.summary(modern)["value"]["noteCount"], 1)
+        excluded = next(item for item in modern["diagnostics"] if item["code"] == "negative_note_length")
+        self.assertIn("excluded", excluded["message"])
 
     def test_tempo_conflict_and_automated_tempo_element(self):
         path = self.write("song.mmp")
@@ -401,7 +460,7 @@ class LmmsProjectTest(ProjectCliCase):
             "no-type.mmp": b"<lmms-project/>",
             "bad-bpm.mmp": LMMS_XML.format(bpm="fast").encode(),
             "zero-meter.mmp": good.replace('timesig_numerator="3"', 'timesig_numerator="0"').encode(),
-            "bad-note.mmp": good.replace('key="57" pos="0" len="48"', 'key="500" pos="0" len="48"').encode(),
+            "negative-volume.mmp": good.replace('key="57" pos="0" len="48" vol="100"', 'key="57" pos="0" len="48" vol="-5"').encode(),
             "missing-note-attr.mmp": good.replace('<note key="62" pos="0" len="48" vol="100" pan="0"/>', '<note key="62" pos="0"/>').encode(),
             "nan.mmp": good.replace('key="62" pos="0"', 'key="62" pos="nan"').encode(),
             "cut-off.mmp": good[:400].encode(),
