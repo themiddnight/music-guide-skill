@@ -7,10 +7,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from xml.etree.ElementTree import Element
 
-from ..model import Detail, Diagnostic, Evidence
+from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import Note
 from ..project import ProjectFacts, TrackKind
 from .common import MAX_XML_BYTES, _child, _finite_number, _local, _parse_xml, _read_zip_member
+from .textnum import MAX_BEAT, beat_float
 
 CHANNEL_ROLES: dict[str, TrackKind] = {"master": "master", "effect": "return", "submix": "group"}
 CONTENT_TYPES: list[tuple[str, TrackKind]] = [("tracks", "folder"), ("notes", "instrument"), ("audio", "audio")]
@@ -19,6 +20,7 @@ METADATA_FIELDS = ("Title", "Artist", "Album", "OriginalArtist", "Composer", "So
 MAX_METADATA_TEXT = 500
 MAX_DEPTH = 32
 EPSILON = 1e-9
+MAX_ATTRIBUTE = 1e15
 PLACEHOLDER_VELOCITY = 100
 # The DAWproject specification says a timeline without a time unit uses beats.
 DEFAULT_UNIT = "beats"
@@ -44,8 +46,8 @@ def _number(element: Element, name: str, *, required: bool = True) -> float | No
         value = float(text)
     except ValueError as error:
         raise ValueError(f"DAWproject {_local(element.tag)} {name} must be a number, not {text!r}") from error
-    if not math.isfinite(value):
-        raise ValueError(f"DAWproject {_local(element.tag)} {name} must be finite")
+    if not math.isfinite(value) or abs(value) > MAX_ATTRIBUTE:
+        raise ValueError(f"DAWproject {_local(element.tag)} {name} must be finite and below {MAX_ATTRIBUTE:g}")
     return value
 
 
@@ -66,8 +68,9 @@ def _unit(element: Element, attribute: str, inherited: str) -> str:
 class _Clock:
     """Maps between quarter-note beats and seconds with piecewise-linear knots (beat, seconds)."""
 
-    def __init__(self, knots: list[tuple[float, float]], first_bpm: float, last_bpm: float) -> None:
+    def __init__(self, knots: list[tuple[float, float]], first_bpm: float, last_bpm: float, ramps: bool = False) -> None:
         self.knots = knots
+        self.ramps = ramps
         self.beats = [beat for beat, _ in knots]
         self.seconds = [second for _, second in knots]
         self.first_bpm = first_bpm
@@ -91,7 +94,10 @@ class _Clock:
             else:
                 beat, second = beat + (next_time - time) * tempo / 60, next_time
             knots.append((beat, second))
-        return cls(knots, first_bpm, points[-1][1])
+        if not all(math.isfinite(value) and abs(value) <= MAX_BEAT * 1e3 for knot in knots for value in knot):
+            raise ValueError("DAWproject tempo automation places points outside the supported range")
+        ramps = any(linear for (_, _, linear), _ in zip(points, points[1:]))
+        return cls(knots, first_bpm, points[-1][1], ramps)
 
     def seconds_at(self, beat: float) -> float:
         return self._map(beat, self.beats, self.seconds, 60 / self.first_bpm, 60 / self.last_bpm)
@@ -138,6 +144,8 @@ class _Arrangement:
         self.track_ids = track_ids
         self.clock = clock
         self.clips: dict[int, int] = {}
+        self.ramped: set[int] = set()
+        self.placeholders: dict[int, int] = {}
         self.notes: dict[int, list[Note]] = {}
         self.flags: dict[str, int] = {}
 
@@ -149,10 +157,12 @@ class _Arrangement:
         unit = unit or scope.unit
         relative = value - scope.play
         if unit == "beats":
-            return scope.start + relative
+            return beat_float(scope.start + relative)
         if self.clock is None:
             raise _NoClock
-        return self.clock.beats_at(self.clock.seconds_at(scope.start) + relative)
+        if self.clock.ramps and scope.track is not None:
+            self.ramped.add(scope.track)
+        return beat_float(self.clock.beats_at(self.clock.seconds_at(scope.start) + relative))
 
     def walk(self, node: Element, scope: _Scope) -> None:
         if scope.depth > MAX_DEPTH:
@@ -243,15 +253,16 @@ class _Arrangement:
                     continue
                 begin = max(begin, low)
                 end = end if high is None else min(end, high)
-            velocity = _number(item, "vel", required=False)
-            if velocity is None:
-                self.flag("placeholder_velocity")
-                value = PLACEHOLDER_VELOCITY
-            else:
-                value = max(1, min(127, round(velocity * 127)))
             if scope.track is None:
                 self.flag("unassigned_notes")
                 continue
+            velocity = _number(item, "vel", required=False)
+            if velocity is None:
+                self.flag("placeholder_velocity")
+                self.placeholders[scope.track] = self.placeholders.get(scope.track, 0) + 1
+                value = PLACEHOLDER_VELOCITY
+            else:
+                value = max(1, min(127, round(velocity * 127)))
             self.notes.setdefault(scope.track, []).append(Note(key, value, begin, end, channel))
 
     def read_markers(self, markers: Element, scope: _Scope) -> None:
@@ -404,6 +415,11 @@ def dawproject(path: Path, source_id: str, evidence: Evidence, detail: Detail) -
     if tempo_points:
         facts.tempo_map([{"beat": beat, "bpm": bpm} for beat, bpm in tempo_points], "Arrangement/TempoAutomation")
         clock = automated
+        if automated is not None and automated.ramps:
+            evidence.diagnostics.append(Diagnostic(
+                "dawproject_tempo_ramp_approximation", "info",
+                "Tempo automation contains linear ramps. project.tempo_map lists the stored points only, and conversions "
+                "between seconds and beats approximate each ramp by its mean tempo.", source_id))
     _meter_automation(arrangement, evidence, source_id, clock)
     reader = _Arrangement(facts, evidence, source_id, track_ids, clock)
     scope = _Scope(DEFAULT_UNIT)
@@ -413,7 +429,7 @@ def dawproject(path: Path, source_id: str, evidence: Evidence, detail: Detail) -
     for index in sorted(reader.clips):
         facts.clip_count(reader.clips[index], "Arrangement//Lanes//Clip", index)
     for index in sorted(reader.notes):
-        facts.track_notes(index, reader.notes[index], "Arrangement//Clip//Notes")
+        _track_notes(facts, evidence, source_id, reader, index)
     for flag, amount in reader.flags.items():
         if flag in NOTICES:
             severity, message = NOTICES[flag]
@@ -423,6 +439,25 @@ def dawproject(path: Path, source_id: str, evidence: Evidence, detail: Detail) -
             "dawproject_note_timing", "info",
             "Note times are quarter-note beats on the arrangement; seconds-based content is converted with the "
             "stored tempo (a held or mean-ramp approximation when tempo is automated).", source_id))
+
+
+def _track_notes(facts: ProjectFacts, evidence: Evidence, source_id: str, reader: _Arrangement, index: int) -> None:
+    notes = reader.notes[index]
+    reason = "Aggregated from stored notes; beats are quarter notes, not audible timing."
+    confidence: Confidence = "high"
+    placeholders = reader.placeholders.get(index, 0)
+    if placeholders:
+        reason += (f" {placeholders} of {len(notes)} velocities are placeholders ({PLACEHOLDER_VELOCITY}) because the "
+                   "project stores none, so velocity statistics describe notation, not a performance.")
+        confidence = "medium"
+        evidence.add(source_id, "dawproject.velocity_placeholders",
+                     {"placeholder": placeholders, "total": len(notes), "velocity": PLACEHOLDER_VELOCITY}, "count",
+                     f"project_track:{index}", "static", "Arrangement//Clip//Notes", "dawproject-xml", "extracted", "high",
+                     "Notes whose velocity is the adapter placeholder, not a stored value.")
+    if index in reader.ramped:
+        reason += " Seconds-based content was placed with a tempo ramp approximated by its mean tempo."
+        confidence = "medium"
+    facts.track_notes(index, notes, "Arrangement//Clip//Notes", reason, confidence)
 
 
 def _plugins(facts: ProjectFacts, channel: Element | None, track: int | None, locator: str) -> None:

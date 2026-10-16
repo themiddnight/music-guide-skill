@@ -691,6 +691,63 @@ class DawProjectTest(ScoreCase):
                 self.assertTrue(any(item["code"] == "dawproject_metadata_unreadable" for item in data["diagnostics"]))
         self.assertEqual(self.values(self.evidence("--project", self.project(metadata=None)), "project.track_count"), [3])
 
+    def arrangement(self, body, tempo=""):
+        return DAW_HEAD + DAW_STRUCTURE + f'<Arrangement>{tempo}{body}</Arrangement></Project>'
+
+    def test_astronomical_numbers_are_errors_not_overflows(self):
+        lane = '<Lanes track="t1"><Clips>{}</Clips></Lanes>'
+        huge_note = lambda time, duration: (f'<Clip time="0" duration="8"><Notes><Note time="{time}" duration="{duration}" '
+                                            'channel="0" key="60" vel="0.5"/></Notes></Clip>')
+        ramp = ('<TempoAutomation unit="bpm" timeUnit="beats"><RealPoint time="0" value="{}" interpolation="hold"/>'
+                '<RealPoint time="{}" value="60" interpolation="hold"/></TempoAutomation>')
+        cases = {
+            "note-time": (lane.format(huge_note("1e308", "1e308")), ""),
+            "note-duration": (lane.format(huge_note("0", "1e308")), ""),
+            "clip-time": (lane.format('<Clip time="1e308" duration="1e308"/>'), ""),
+            "marker": ('<Markers timeUnit="beats"><Marker time="1e308" name="x"/></Markers>', ""),
+            "tempo-time": (lane.format(huge_note("0", "1")), ramp.format("120", "1e308")),
+            "tiny-tempo-seconds": (lane.format('<Clip time="1" duration="2" contentTimeUnit="seconds"><Notes>'
+                                               + daw_note(1, 1, 60) + '</Notes></Clip>'), ramp.format("1e-320", "16")),
+        }
+        for name, (body, tempo) in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.project(self.arrangement(body, tempo)), mixdown=True)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+    def test_placeholder_velocities_are_counted_and_lower_confidence(self):
+        silent = '<Note time="2" duration="1" channel="0" key="62"/>'
+        body = ('<Lanes track="t1"><Clips><Clip time="0" duration="8"><Notes>' + daw_note(0, 1, 60) + silent
+                + '</Notes></Clip></Clips></Lanes>')
+        data = self.evidence("--project", self.project(self.arrangement(body)))
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("1 of 2 velocities are placeholders", summary["confidenceReason"])
+        self.assertEqual(self.values(data, "dawproject.velocity_placeholders"), [{"placeholder": 1, "total": 2, "velocity": 100}])
+        self.assertIn("1 note", next(item for item in data["diagnostics"]
+                                     if item["code"] == "dawproject_placeholder_velocity")["message"])
+        stored = self.evidence("--project", self.project())
+        self.assertEqual({item["confidence"] for item in stored["observations"] if item["property"] == "project.track_notes"}, {"high"})
+        self.assertFalse(any(item["code"] == "dawproject_placeholder_velocity" for item in stored["diagnostics"]))
+
+    def test_tempo_ramps_are_declared_even_without_notes_and_lower_note_confidence(self):
+        ramp = ('<TempoAutomation unit="bpm" timeUnit="beats"><RealPoint time="0" value="120" interpolation="linear"/>'
+                '<RealPoint time="16" value="60" interpolation="hold"/></TempoAutomation>')
+        empty = self.evidence("--project", self.project(self.arrangement('<Lanes track="t1"><Clips/></Lanes>', ramp)))
+        notice = next(item for item in empty["diagnostics"] if item["code"] == "dawproject_tempo_ramp_approximation")
+        self.assertIn("mean tempo", notice["message"])
+        body = ('<Lanes track="t1"><Clips><Clip time="0" duration="8"><Notes>' + daw_note(0, 1, 60) + '</Notes></Clip></Clips></Lanes>'
+                '<Lanes track="t3"><Clips><Clip time="4" duration="8" contentTimeUnit="seconds"><Notes>' + daw_note(1, 1, 64)
+                + '</Notes></Clip></Clips></Lanes>')
+        data = self.evidence("--project", self.project(self.arrangement(body, ramp)))
+        summaries = {item["scope"]: item for item in data["observations"] if item["property"] == "project.track_notes"}
+        self.assertEqual(summaries["project_track:0"]["confidence"], "high")
+        self.assertEqual(summaries["project_track:2"]["confidence"], "medium")
+        self.assertIn("mean tempo", summaries["project_track:2"]["confidenceReason"])
+        hold = ramp.replace('interpolation="linear"', 'interpolation="hold"')
+        quiet = self.evidence("--project", self.project(self.arrangement(body, hold)))
+        self.assertFalse(any(item["code"] == "dawproject_tempo_ramp_approximation" for item in quiet["diagnostics"]))
+
     def test_malformed_arrangements_are_rejected_atomically(self):
         def project(arrangement):
             return self.project(DAW_HEAD + DAW_STRUCTURE + arrangement + "</Project>")
