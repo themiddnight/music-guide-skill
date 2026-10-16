@@ -554,12 +554,20 @@ class MusicGuideTest(unittest.TestCase):
                 self.assertTrue(any(item["code"] == "optional_source_error" for item in data["diagnostics"]))
 
     def test_missing_dependencies_print_one_actionable_line(self):
-        bare = Path("/usr/bin/python3")
-        if not bare.exists():
-            self.skipTest("no system interpreter")
-        if subprocess.run([str(bare), "-I", "-c", "import numpy, soundfile, mido, defusedxml"],
-                          capture_output=True).returncode == 0:
-            self.skipTest("system interpreter already has the dependencies")
+        bare = None
+        for candidate in ("/usr/bin/python3", getattr(sys, "_base_executable", "")):
+            if not candidate or not Path(candidate).exists():
+                continue
+            probe = subprocess.run([candidate, "-I", "-c",
+                                    "import sys, numpy, soundfile, mido, defusedxml; sys.exit(0 if sys.version_info >= (3, 10) else 1)"],
+                                   capture_output=True)
+            version = subprocess.run([candidate, "-c", "import sys; print(sys.version_info >= (3, 10))"],
+                                     capture_output=True, text=True).stdout.strip()
+            if probe.returncode != 0 and version == "True":
+                bare = Path(candidate)
+                break
+        if bare is None:
+            self.skipTest("no Python 3.10+ interpreter without the dependencies")
         result = subprocess.run([str(bare), "-I", str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(self.mix)],
                                 cwd=self.dir, text=True, capture_output=True)
         self.assertEqual(result.returncode, 3)
@@ -570,6 +578,7 @@ class MusicGuideTest(unittest.TestCase):
         self.assertRegex(lines[0], r"missing Python module '(numpy|soundfile|mido|defusedxml)'")
         self.assertIn(str((SKILL / "requirements.txt").resolve()), lines[0])
         self.assertIn("venv", lines[0])
+        self.assertIn("3.10 or newer", lines[0])
 
 
 if __name__ == "__main__":

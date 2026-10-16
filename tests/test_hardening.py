@@ -295,5 +295,37 @@ class MidiBoundsTest(CliCase):
         self.assertEqual([(n["velocity"], n["startTick"], n["endTick"]) for n in notes], [(64, 0, 32), (80, 16, 48)])
 
 
+class InterpreterVersionTest(CliCase):
+    def run_as(self, version: tuple, args: list[str]):
+        script = ("import runpy, sys\n"
+                  f"sys.version_info = {version!r}\n"
+                  f"sys.argv = ['analyze.py', *{args!r}]\n"
+                  f"runpy.run_path({str(SKILL / 'scripts' / 'analyze.py')!r}, run_name='__main__')\n")
+        return subprocess.run([sys.executable, "-I", "-c", script], cwd=self.dir, text=True, capture_output=True)
+
+    def test_old_python_gets_one_actionable_line(self):
+        result = self.run_as((3, 9, 6, "final", 0), ["--mixdown", str(self.mix)])
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        lines = result.stderr.strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Python 3.10 or newer", lines[0])
+        self.assertIn("3.9.6", lines[0])
+        self.assertIn("uv run", lines[0])
+        self.assertIn("python3.12 -m venv", lines[0])
+
+    @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system interpreter")
+    def test_real_system_interpreter_below_3_10_is_caught_before_any_import(self):
+        probe = subprocess.run(["/usr/bin/python3", "-c", "import sys; print(sys.version_info >= (3, 10))"],
+                               capture_output=True, text=True)
+        if probe.stdout.strip() != "False":
+            self.skipTest("system interpreter is 3.10 or newer")
+        result = subprocess.run(["/usr/bin/python3", "-I", str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(self.mix)],
+                                cwd=self.dir, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("Python 3.10 or newer", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
