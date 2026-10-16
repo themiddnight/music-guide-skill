@@ -77,7 +77,8 @@ class ErrorBoundaryTest(CliCase):
         self.assertEqual(len(diagnostics), 1)
         self.assertIn("ZeroDivisionError", diagnostics[0].message)
         self.assertTrue(any(item.property == "audio.sample_peak" for item in evidence.observations))
-        with mock.patch.object(cli.audio, "audio", side_effect=ZeroDivisionError("boom")):
+        from music_guide.adapters import audio
+        with mock.patch.object(audio, "audio", side_effect=ZeroDivisionError("boom")):
             with self.assertRaisesRegex(ValueError, "required mixdown"):
                 cli.build(self.mix, [], None)
 
@@ -581,6 +582,41 @@ class PlausibleValueTest(CliCase):
         data = self.evidence("--project", path)
         self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
         self.assertEqual(self.values(data, "tempo") + self.values(data, "meter"), [])
+
+
+class StartupCostTest(CliCase):
+    def loaded(self, *args) -> set[str]:
+        script = ("import sys\n"
+                  f"sys.path.insert(0, {str(SKILL / 'scripts')!r})\n"
+                  "from music_guide.cli import main\n"
+                  f"main({[*map(str, args)]!r})\n"
+                  "print('LOADED:' + ','.join(name for name in ('scipy', 'soundfile', 'numpy') if name in sys.modules), file=sys.stderr)\n")
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(item for item in result.stderr.splitlines() if item.startswith("LOADED:"))
+        return set(filter(None, line.removeprefix("LOADED:").split(",")))
+
+    def test_midi_only_runs_skip_the_audio_stack(self):
+        midi = self.write("a.mid", smf(b"\x00\x90\x3c\x40\x10\x80\x3c\x00" + END_OF_TRACK))
+        loaded = self.loaded("--midi", midi)
+        self.assertNotIn("scipy", loaded)
+        self.assertNotIn("soundfile", loaded)
+
+    def test_audio_runs_still_load_it(self):
+        self.assertIn("scipy", self.loaded("--mixdown", self.mix))
+
+    def test_missing_audio_dependency_is_still_reported_before_any_work(self):
+        script = ("import sys, importlib.util\n"
+                  "real = importlib.util.find_spec\n"
+                  "importlib.util.find_spec = lambda name, *a: None if name == 'scipy' else real(name, *a)\n"
+                  "import runpy\n"
+                  f"sys.argv = ['analyze.py', '--midi', {str(self.dir / 'a.mid')!r}]\n"
+                  f"runpy.run_path({str(SKILL / 'scripts' / 'analyze.py')!r}, run_name='__main__')\n")
+        self.write("a.mid", smf(END_OF_TRACK))
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("missing Python module 'scipy'", result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1)
 
 
 if __name__ == "__main__":

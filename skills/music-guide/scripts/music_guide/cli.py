@@ -9,11 +9,9 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-import soundfile as sf
 from defusedxml.common import DefusedXmlException
 
 from . import formats
-from .adapters import audio
 from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_ZIP_BYTES, _load_json, _read_bounded
 from .formats import ProjectFormat
 from .model import Detail, Diagnostic, Evidence, Source, detect_conflicts
@@ -63,7 +61,7 @@ def _merge(target: Evidence, staged: Evidence) -> None:
 
 # Failures a parser reports on purpose. Anything else is a defect worth naming by type.
 EXPECTED_ERRORS = (OSError, ValueError, TypeError, KeyError, EOFError, zipfile.BadZipFile, ET.ParseError,
-                   DefusedXmlException, sf.LibsndfileError, RecursionError)
+                   DefusedXmlException, RecursionError)
 
 
 def _describe(error: Exception) -> str:
@@ -110,6 +108,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
             if not path.exists():
                 raise ValueError("source does not exist")
             if role in AUDIO_ROLES:
+                from .adapters import audio  # Loaded on demand: numpy, scipy and libsndfile cost about 0.7 s.
                 _require_file(path, MAX_AUDIO_BYTES)
                 source.sha256 = _hash(path)
                 staged = Evidence()
