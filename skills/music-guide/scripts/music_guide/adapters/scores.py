@@ -42,6 +42,7 @@ class ScorePart:
     locator: str
     notes: list[Note] = field(default_factory=list)
     instrument: str | None = None
+    placeholder_velocities: int = 0
 
 
 @dataclass
@@ -65,11 +66,7 @@ def _extra(evidence: Evidence, source_id: str, method: str, property: str, value
 
 
 def _distinct(values: list[Any]) -> list[Any]:
-    seen: list[Any] = []
-    for value in values:
-        if value not in seen:
-            seen.append(value)
-    return seen
+    return list(dict.fromkeys(values))
 
 
 def emit_score(evidence: Evidence, source_id: str, method: str, prefix: str, detail: Detail,
@@ -81,11 +78,13 @@ def emit_score(evidence: Evidence, source_id: str, method: str, prefix: str, det
         if part.instrument:
             _extra(evidence, source_id, method, f"{prefix}.instrument", part.instrument, "text",
                    f"project_track:{index}", "static", part.locator, "Instrument name stored for the part.")
-        facts.track_notes(index, part.notes, part.locator)
-    if any(part.notes for part in data.parts):
+        _notes(evidence, source_id, method, prefix, facts, data, index, part)
+    placeholders = sum(part.placeholder_velocities for part in data.parts)
+    if placeholders:
+        total = sum(len(part.notes) for part in data.parts)
         evidence.diagnostics.append(Diagnostic(
             "score_velocity_placeholder", "info",
-            f"Notes without a stored dynamic carry the placeholder velocity {data.default_velocity}. "
+            f"{placeholders} of {total} notes store no velocity and carry the placeholder {data.default_velocity}. "
             "Velocity statistics describe notation, not a performance.", source_id))
     _tempo(evidence, source_id, method, facts, data)
     _meter(evidence, source_id, method, prefix, facts, data)
@@ -99,6 +98,22 @@ def emit_score(evidence: Evidence, source_id: str, method: str, prefix: str, det
            "measures", "Longest part, in stored measures; repeats and jumps are not unrolled.")
     _extra(evidence, source_id, method, f"{prefix}.length", data.length_beats, "quarter_notes", "project", "static",
            "measure contents", "Stored notated length of the longest part; repeats and jumps are not unrolled.")
+
+
+def _notes(evidence: Evidence, source_id: str, method: str, prefix: str, facts: ProjectFacts, data: ScoreData,
+           index: int, part: ScorePart) -> None:
+    total = len(part.notes)
+    if not part.placeholder_velocities:
+        facts.track_notes(index, part.notes, part.locator)
+        return
+    reason = (f"Aggregated from stored notes; beats are quarter notes, not audible timing. "
+              f"{part.placeholder_velocities} of {total} velocities are placeholders ({data.default_velocity}) "
+              "because the score stores none, so velocity statistics describe notation, not a performance.")
+    facts.track_notes(index, part.notes, part.locator, reason, "medium")
+    _extra(evidence, source_id, method, f"{prefix}.velocity_placeholders",
+           {"placeholder": part.placeholder_velocities, "total": total, "velocity": data.default_velocity},
+           "count", f"project_track:{index}", "static", part.locator,
+           "Notes whose velocity is the adapter placeholder, not a stored value.")
 
 
 def _tempo(evidence: Evidence, source_id: str, method: str, facts: ProjectFacts, data: ScoreData) -> None:

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree.ElementTree import Element
 
-from ..model import Detail, Diagnostic, Evidence
+from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import Note
 from ..project import ProjectFacts, TrackKind
 from .common import _finite_number, _parse_xml, _read_bounded
@@ -28,6 +28,12 @@ DOCTYPE = re.compile(rb"<!DOCTYPE\s+lmms-project\s*>")
 # DefaultTicksPerTact is 192 ticks per whole note in every meter, so a quarter note is 48 ticks.
 TICKS_PER_QUARTER = 48
 PROJECT_TYPES = ("song", "projecttemplate")
+# LMMS DataFile upgrades: file version 19 and older gain +12 on every key (UpgradeExtendedNoteRange, A4 moved from key 57
+# to 69), and file version 26 and older turn negative-length notes into step notes of DefaultTicksPerBar / 16 ticks.
+EXTENDED_RANGE_VERSION = 20
+STEP_NOTE_VERSION = 27
+STEP_NOTE_TICKS = 192 // 16
+MIDI_KEYS = range(128)
 # LMMS 1.2 tag names first, then the names LMMS 1.3 renamed them to.
 SONG_TRACK_TYPES: dict[int, tuple[str, TrackKind]] = {
     0: ("instrument", "instrument"), 1: ("beat_bassline", "group"), 2: ("sample", "audio"), 3: ("event", "unknown"),
@@ -136,25 +142,70 @@ def _specific(track: Element) -> list[Element]:
     return [child for child in track if child.tag not in CLIPS]
 
 
-def _notes(track: Element, locator: str) -> tuple[list[Note], int]:
+@dataclass(frozen=True)
+class _Convention:
+    """How this file's keys and step-note lengths map to MIDI, from LMMS's own file-version upgrades."""
+
+    key_offset: int
+    convert_steps: bool
+    confidence: Confidence
+    reason: str
+
+
+def _convention(root: Element) -> _Convention:
+    version = root.attrib.get("version", "").strip()
+    creator = root.attrib.get("creatorversion", "").strip()
+    if version in ("", "1.0"):
+        # LMMS derives the file version of these files from creatorversion; every release it can name predates both upgrades.
+        if creator:
+            return _Convention(12, True, "high", f"The file predates integer file versions (created with LMMS {creator[:40]}), "
+                               "so LMMS upgrades it on load: stored key 57 is A4 and the reported pitch is key + 12.")
+        return _Convention(12, True, "low", "The file stores neither a file version nor a creator version, so the oldest "
+                           "convention was assumed (LMMS does the same): stored key 57 is A4 and the reported pitch is key + 12.")
+    if version.isascii() and version.isdigit() and len(version) < 6:
+        number = int(version)
+        if number >= EXTENDED_RANGE_VERSION:
+            return _Convention(0, number < STEP_NOTE_VERSION, "high", f"Stored by LMMS file version {number}, which keys notes "
+                               "as MIDI numbers: stored key 69 is A4 and the reported pitch equals the key.")
+        return _Convention(12, True, "high", f"Stored by LMMS file version {number}, before the extended note range: "
+                           "stored key 57 is A4 and the reported pitch is key + 12.")
+    return _Convention(12, True, "low", "The LMMS file version is not a number, so the oldest convention was assumed "
+                       "(LMMS does the same): stored key 57 is A4 and the reported pitch is key + 12.")
+
+
+@dataclass
+class _NoteCounts:
+    out_of_range: int = 0
+    converted_steps: int = 0
+    excluded_steps: int = 0
+
+
+def _notes(track: Element, locator: str, convention: _Convention, counts: _NoteCounts) -> list[Note]:
     notes: list[Note] = []
-    stepped = 0
     for tag in MIDI_CLIPS:
         for number, clip in enumerate(track.findall(tag)):
             label = f"{locator}/{tag}[{number}]"
             start = _whole(clip, "pos", label, 0)
             for note in clip.findall("note"):
-                key = _whole(note, "key", f"{label}/note", 0)
+                key = _whole(note, "key", f"{label}/note")
                 length = _whole(note, "len", f"{label}/note")
                 position = start + _whole(note, "pos", f"{label}/note", 0)
                 volume = _attribute(note, "vol", f"{label}/note")
-                pitch = key + 12
-                if pitch > 127 or volume < 0:
-                    raise ValueError(f"{label}/note has a key or volume outside the supported range")
-                stepped += length < 0
+                if volume < 0:
+                    raise ValueError(f"{label}/note has a negative volume")
+                pitch = key + convention.key_offset
+                if pitch not in MIDI_KEYS:
+                    counts.out_of_range += 1
+                    continue
+                if length < 0:
+                    if not convention.convert_steps:
+                        counts.excluded_steps += 1
+                        continue
+                    length = STEP_NOTE_TICKS
+                    counts.converted_steps += 1
                 notes.append(Note(pitch, min(127, round(volume * 127 / 200)), position / TICKS_PER_QUARTER,
-                                  (position + abs(length)) / TICKS_PER_QUARTER))
-    return notes, stepped
+                                  (position + length) / TICKS_PER_QUARTER))
+    return notes
 
 
 def lmms(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
@@ -192,10 +243,12 @@ def lmms(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
     song = root.find("song")
     if song is None:
         return
+    convention = _convention(root)
+    counts = _NoteCounts()
     tracks = _tracks(song)
     facts.track_count(len(tracks), "song/trackcontainer/track")
     media: list[str] = []
-    stepped_total = noted = 0
+    noted = 0
     for index, item in enumerate(tracks):
         element, locator = item.element, item.locator
         code = _whole(element, "type", locator, 0)
@@ -216,10 +269,11 @@ def lmms(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
         clips = sum(len(element.findall(tag)) for tag in CLIPS)
         if clips:
             facts.clip_count(clips, f"{locator}/clips", index)
-        notes, stepped = _notes(element, locator)
-        stepped_total += stepped
+        notes = _notes(element, locator, convention, counts)
         noted += len(notes)
-        facts.track_notes(index, notes, f"{locator}/pattern/note")
+        facts.track_notes(index, notes, f"{locator}/pattern/note",
+                          "Aggregated from stored notes; beats are quarter notes, not audible timing. " + convention.reason,
+                          convention.confidence)
     for mixer_tag, channel_tag in zip(MIXERS, CHANNELS):
         for channel in song.findall(f"{mixer_tag}/{channel_tag}"):
             for effect in channel.findall("fxchain/effect"):
@@ -233,10 +287,22 @@ def lmms(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
                                    "enabled": timeline.attrib.get("lpstate") == "1"},
               "loop", "song/timeline", "Stored loop points; they do not mark arrangement sections.",
               time_domain="project_beats")
-    if stepped_total:
+    if counts.converted_steps:
         evidence.diagnostics.append(Diagnostic("negative_note_length", "info",
-            f"{stepped_total} notes store a negative length (beat step notes); their length is taken as the magnitude.", source_id))
+            f"{counts.converted_steps} note(s) store a negative length (beat step notes). LMMS's own upgrade sets their length "
+            f"to DefaultTicksPerBar/16 = 192/16 = {STEP_NOTE_TICKS} ticks, and that length is used.", source_id))
+    if counts.excluded_steps:
+        evidence.diagnostics.append(Diagnostic("negative_note_length", "warning",
+            f"{counts.excluded_steps} note(s) store a negative length, which LMMS stopped writing at file version "
+            f"{STEP_NOTE_VERSION}; they were excluded because no length can be confirmed.", source_id))
+    if counts.out_of_range:
+        evidence.diagnostics.append(Diagnostic("lmms_notes_out_of_range", "warning",
+            f"{counts.out_of_range} note(s) were skipped because their key falls outside MIDI 0-127 under the convention "
+            f"used here (key offset {convention.key_offset:+d}).", source_id))
     if noted:
+        evidence.add(source_id, "lmms.pitch_convention", {"keyOffset": convention.key_offset, "a4Key": 69 - convention.key_offset},
+                     "convention", "project", "static", "lmms-project/@version,@creatorversion", method, "extracted",
+                     convention.confidence, convention.reason)
         evidence.diagnostics.append(Diagnostic("lmms_pitch_convention", "info",
-            "LMMS keys are reported as MIDI pitch = key + 12 (LMMS key 57 is A4). Base-note and master-pitch transposition are not applied. "
+            f"{convention.reason} Base-note and master-pitch transposition are not applied. "
             "Note positions inside a beat/bassline pattern are local to that pattern.", source_id))

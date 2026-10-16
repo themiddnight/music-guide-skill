@@ -24,9 +24,9 @@ class ProjectCliCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, **options):
         return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+                              cwd=self.dir, text=True, capture_output=True, timeout=120, **options)
 
     def evidence(self, *args):
         result = self.run_cli(*args)
@@ -202,7 +202,11 @@ class LogicPackageTest(ProjectCliCase):
         self.assertIn("symbolic link", self.failed(linked_alt))
         linked_dir = self.make_package("dir.logicx")
         os.symlink(self.dir, linked_dir / "Media")
-        self.assertIn("symbolic link", self.failed(linked_dir))
+        data = self.project(linked_dir)
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "logic.bundled_media"), [])
+        skipped = next(item for item in data["diagnostics"] if item["code"] == "bundled_media_skipped")
+        self.assertIn("symbolic link", skipped["message"])
         inner = self.make_package("inner.logicx")
         media = inner / "Media"
         media.mkdir()
@@ -210,6 +214,31 @@ class LogicPackageTest(ProjectCliCase):
         (media / "kick.wav").write_bytes(b"x")
         data = self.project(inner)
         self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 1, "linksNotFollowed": 1, "truncated": False}])
+
+    def test_named_pipes_are_refused_without_blocking(self):
+        for relative in (("Alternatives", "000", "MetaData.plist"), ("Resources", "ProjectInformation.plist")):
+            with self.subTest(plist=relative[-1]):
+                package = self.make_package(f"fifo-{relative[-1]}.logicx")
+                target = package.joinpath(*relative)
+                target.unlink()
+                os.mkfifo(target)
+                self.assertIn("not a regular file", self.failed(package))
+
+    def test_bundled_media_directories_count_toward_the_walk_cap(self):
+        package = self.make_package()
+        media = package / "Media"
+        media.mkdir()
+        for number in range(50_001):
+            (media / f"d{number}").mkdir()
+        data = self.project(package)
+        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+
+    def test_integral_float_sample_rate_is_accepted(self):
+        data = self.project(self.make_package(meta={"SampleRate": 44100.0}))
+        self.assertEqual(self.values(data, "project.sample_rate"), [44100])
+        for bad in (44100.5, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                self.failed(self.make_package(f"rate-{bad}.logicx", meta={"SampleRate": bad}))
 
 
 LMMS_XML = """<?xml version="1.0"?>
@@ -311,7 +340,7 @@ class LmmsProjectTest(ProjectCliCase):
             self.assertEqual((lead["startBeat"], lead["endBeat"]), (4, 17))
             kick = next(item["value"] for item in data["observations"]
                         if item["property"] == "project.track_notes" and item["scope"] == "project_track:1")
-            self.assertEqual((kick["noteCount"], kick["velocityMin"], kick["velocityMax"], kick["endBeat"]), (2, 64, 127, 6))
+            self.assertEqual((kick["noteCount"], kick["velocityMin"], kick["velocityMax"], kick["endBeat"]), (2, 64, 127, 2.25))
             self.assertFalse(any(item["property"] == "project.note" for item in data["observations"]))
             self.assertTrue(any(item["code"] == "negative_note_length" for item in data["diagnostics"]))
             self.assertTrue(any(item["code"] == "lmms_pitch_convention" for item in data["diagnostics"]))
@@ -323,6 +352,65 @@ class LmmsProjectTest(ProjectCliCase):
         self.assertEqual([(note["pitch"], note["velocity"], note["startBeat"], note["endBeat"]) for note in lead],
                          [(69, 64, 4, 5), (72, 32, 5, 7), (74, 64, 16, 17)])
         self.assertEqual(len([item for item in data["observations"] if item["property"] == "project.note"]), 5)
+
+    def roots(self, version, creatorversion="1.3.0", notes=""):
+        attrs = (f' version="{version}"' if version is not None else "") + (
+            f' creatorversion="{creatorversion}"' if creatorversion is not None else "")
+        return (f'<?xml version="1.0"?><lmms-project{attrs} type="song" creator="LMMS"><head bpm="120"/><song>'
+                f'<trackcontainer type="song"><track type="0" name="Lead"><instrumenttrack vol="100"/>'
+                f'<pattern type="1" pos="0" len="192">{notes}</pattern></track></trackcontainer></song></lmms-project>')
+
+    def summary(self, data):
+        return next(item for item in data["observations"] if item["property"] == "project.track_notes")
+
+    def test_key_convention_follows_the_file_version(self):
+        note = '<note key="{key}" pos="0" len="48" vol="100"/>'
+        cases = (("30", "1.3.0", 69, "high"), ("20", "1.3.0", 69, "high"), ("19", "1.3.0", 57, "high"),
+                 ("1.0", "1.2.2", 57, "high"), (None, "1.2.2", 57, "high"))
+        for version, creator, key, confidence in cases:
+            with self.subTest(version=version, creator=creator):
+                data = self.project(self.write("v.mmp", self.roots(version, creator, note.format(key=key))))
+                summary = self.summary(data)
+                self.assertEqual(summary["value"]["pitchMin"], {"midi": 69, "name": "A4"})
+                self.assertEqual(summary["confidence"], confidence)
+                self.assertIn("file version", summary["confidenceReason"])
+                self.assertEqual(self.values(data, "lmms.pitch_convention")[0]["keyOffset"], 0 if version == "30" or version == "20" else 12)
+
+    def test_unknown_file_version_states_its_assumption_at_lower_confidence(self):
+        note = '<note key="57" pos="0" len="48" vol="100"/>'
+        for version, creator in ((None, None), ("abc", None)):
+            with self.subTest(version=version):
+                data = self.project(self.write("u.mmp", self.roots(version, creator, note)))
+                summary = self.summary(data)
+                self.assertEqual(summary["confidence"], "low")
+                self.assertIn("assumed", summary["confidenceReason"])
+                self.assertEqual(summary["value"]["pitchMin"]["midi"], 69)
+
+    def test_notes_outside_the_midi_range_are_skipped_and_counted(self):
+        notes = ('<note key="57" pos="0" len="48" vol="100"/><note key="116" pos="0" len="48" vol="100"/>'
+                 '<note key="127" pos="0" len="48" vol="100"/><note key="-3" pos="0" len="48" vol="100"/>')
+        data = self.project(self.write("old.mmp", self.roots("1.0", "1.2.2", notes)))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.summary(data)["value"]["noteCount"], 2)
+        skipped = next(item for item in data["diagnostics"] if item["code"] == "lmms_notes_out_of_range")
+        self.assertIn("2 note", skipped["message"])
+        modern = self.project(self.write("new.mmp", self.roots("30", "1.3.0", notes)))
+        self.assertEqual(self.summary(modern)["value"]["noteCount"], 3)
+        self.assertIn("1 note", next(item for item in modern["diagnostics"] if item["code"] == "lmms_notes_out_of_range")["message"])
+
+    def test_step_notes_follow_lmms_own_upgrade_rule_or_are_excluded(self):
+        notes = ('<note key="57" pos="48" len="-192" vol="100"/><note key="57" pos="0" len="96" vol="100"/>')
+        data = self.project(self.write("old.mmp", self.roots("1.0", "1.2.2", notes)), "--detail", "full")
+        written = sorted((item["value"]["startBeat"], item["value"]["endBeat"]) for item in data["observations"]
+                         if item["property"] == "project.note")
+        self.assertEqual(written, [(0, 2), (1, 1.25)])
+        message = next(item for item in data["diagnostics"] if item["code"] == "negative_note_length")["message"]
+        self.assertIn("1 note", message)
+        self.assertIn("192/16", message)
+        modern = self.project(self.write("new.mmp", self.roots("30", "1.3.0", notes)))
+        self.assertEqual(self.summary(modern)["value"]["noteCount"], 1)
+        excluded = next(item for item in modern["diagnostics"] if item["code"] == "negative_note_length")
+        self.assertIn("excluded", excluded["message"])
 
     def test_tempo_conflict_and_automated_tempo_element(self):
         path = self.write("song.mmp")
@@ -372,7 +460,7 @@ class LmmsProjectTest(ProjectCliCase):
             "no-type.mmp": b"<lmms-project/>",
             "bad-bpm.mmp": LMMS_XML.format(bpm="fast").encode(),
             "zero-meter.mmp": good.replace('timesig_numerator="3"', 'timesig_numerator="0"').encode(),
-            "bad-note.mmp": good.replace('key="57" pos="0" len="48"', 'key="500" pos="0" len="48"').encode(),
+            "negative-volume.mmp": good.replace('key="57" pos="0" len="48" vol="100"', 'key="57" pos="0" len="48" vol="-5"').encode(),
             "missing-note-attr.mmp": good.replace('<note key="62" pos="0" len="48" vol="100" pan="0"/>', '<note key="62" pos="0"/>').encode(),
             "nan.mmp": good.replace('key="62" pos="0"', 'key="62" pos="nan"').encode(),
             "cut-off.mmp": good[:400].encode(),
@@ -554,6 +642,52 @@ class ArdourSessionTest(ProjectCliCase):
         self.assertEqual(self.values(data, "project.marker"), [])
         self.assertEqual(self.values(data, "project.sample_rate"), [])
         self.assertTrue(any(item["code"] == "locations_skipped" for item in data["diagnostics"]))
+
+    def test_oversized_position_numbers_are_errors_not_crashes(self):
+        digits = "9" * 400
+        for label, start in (("sample", digits), ("superclock", f"a{digits}"), ("ticks", f"b{digits}")):
+            with self.subTest(label=label):
+                locations = f'<Location id="1" name="x" start="{start}" end="{start}" flags="IsMark"/>'
+                session = ardour_session(8000, ARDOUR8_TEMPO, locations)
+                self.failed(self.write(f"{label}.ardour", session))
+
+    def test_incomplete_locations_are_skipped_with_a_count(self):
+        locations = """
+          <Location id="1" name="Verse" start="96000" end="96000" flags="IsMark"/>
+          <Location id="2" name="No start" end="96000" flags="IsMark"/>
+          <Location id="3" name="Range no end" start="0" flags="IsRangeMarker"/>
+          <Location id="4" name="Range" start="0" end="48000" flags="IsRangeMarker"/>"""
+        data = self.project(self.write("partial.ardour", ardour_session(6000, ARDOUR6_TEMPO, locations)))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "project.marker"), [{"name": "Verse", "position": 2, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "ardour.range"), [{"name": "Range", "start": 0, "end": 1, "unit": "seconds"}])
+        incomplete = next(item for item in data["diagnostics"] if item["code"] == "locations_incomplete")
+        self.assertIn("2 locations", incomplete["message"])
+
+    def test_implausible_rates_and_meters_are_errors(self):
+        good = ardour_session(6000, ARDOUR6_TEMPO)
+        cases = {
+            "rate-low.ardour": good.replace('sample-rate="48000"', 'sample-rate="500"'),
+            "rate-high.ardour": good.replace('sample-rate="48000"', 'sample-rate="2000000"'),
+            "bar-100.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="100"'),
+            "bar-0.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="0"'),
+        }
+        eight = ardour_session(8000, ARDOUR8_TEMPO)
+        for rate in ("-282240000", "0", "1e999", "nan"):
+            cases[f"superclock-{rate}.ardour"] = eight.replace('superclocks-per-second="282240000"', f'superclocks-per-second="{rate}"')
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                self.failed(self.write(name, text))
+
+    def test_several_meters_without_readable_positions_are_reported(self):
+        old = """<TempoMap>
+            <Tempo start="1|1|0" beats-per-minute="120.000000" note-type="4.000000" movable="0"/>
+            <Meter start="1|1|0" beats-per-bar="4.000000" note-type="4.000000" movable="0"/>
+            <Meter start="5|1|0" beats-per-bar="3.000000" note-type="4.000000" movable="1"/>
+          </TempoMap>"""
+        data = self.project(self.write("meters.ardour", ardour_session(3000, old)))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertTrue(any(item["code"] == "meter_positions_unreadable" for item in data["diagnostics"]))
 
     def test_malformed_and_unsafe_sessions_are_errors(self):
         good = ardour_session(6000, ARDOUR6_TEMPO)

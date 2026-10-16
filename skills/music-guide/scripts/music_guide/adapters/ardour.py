@@ -22,8 +22,12 @@ MAX_ARDOUR_BYTES = 32 * 1024 * 1024
 MAX_ROUTES = 10_000
 TICKS_PER_BEAT = 1920
 PLUGIN_TYPES = frozenset({"lv2", "ladspa", "luaproc", "vst", "lxvst", "windows-vst", "mac-vst", "vst3", "audiounit"})
-SAMPLE_POSITION = re.compile(r"-?\d+")
-TIMED_POSITION = re.compile(r"([ab])(-?\d+)")
+SAMPLE_POSITION = re.compile(r"-?[0-9]{1,18}")
+TIMED_POSITION = re.compile(r"([ab])(-?[0-9]{1,18})")
+SAMPLE_RATES = (1_000, 1_000_000)
+SUPERCLOCK_RATES = (1_000, 10**12)
+MAX_BEATS_PER_BAR = 99
+MAX_NOTE_VALUE = 128
 TRUE_TEXT = frozenset({"1", "yes", "true"})
 
 
@@ -48,10 +52,11 @@ def _quarters(text: str, label: str) -> float:
         raise ValueError(f"{label} must be a beat count such as 4:0") from error
 
 
-def _whole_number(node: Element, name: str, label: str) -> int:
+def _whole_number(node: Element, name: str, label: str, maximum: float = float("inf")) -> int:
     value = _number(node, name, label)
-    if not value.is_integer() or value < 1:
-        raise ValueError(f"{label} {name} must be a positive whole number")
+    if not value.is_integer() or not 1 <= value <= maximum:
+        raise ValueError(f"{label} {name} must be a whole number from 1 to {maximum:g}" if maximum != float("inf")
+                         else f"{label} {name} must be a positive whole number")
     return int(value)
 
 
@@ -59,7 +64,7 @@ def _beat(node: Element, label: str) -> float | None:
     if "quarters" in node.attrib:
         return _quarters(node.attrib["quarters"], f"{label} quarters")
     if "pulse" in node.attrib:
-        return _number(node, "pulse", label) * 4
+        return _finite_number(_number(node, "pulse", label) * 4, f"{label} pulse")
     return 0.0 if node.attrib.get("start") == "1|1|0" else None
 
 
@@ -76,7 +81,7 @@ def _tempo_points(tempo_map: Element) -> list[tuple[float | None, float]]:
         note_type = _number(node, "note-type", label)
         if per_minute <= 0 or note_type <= 0:
             raise ValueError(f"{label} must have a positive tempo and note type")
-        points.append((_beat(node, label), per_minute * 4 / note_type))
+        points.append((_beat(node, label), _finite_number(per_minute * 4 / note_type, f"{label} tempo", positive=True)))
     return points
 
 
@@ -89,7 +94,8 @@ def _meter_points(tempo_map: Element) -> list[tuple[float | None, int, int]]:
         denominator = "note-value" if "note-value" in node.attrib else "note-type"
         # Ardour 4 and older name the numerator beats-per-bar.
         numerator = "divisions-per-bar" if "divisions-per-bar" in node.attrib else "beats-per-bar"
-        points.append((_beat(node, label), _whole_number(node, numerator, label), _whole_number(node, denominator, label)))
+        points.append((_beat(node, label), _whole_number(node, numerator, label, MAX_BEATS_PER_BAR),
+                       _whole_number(node, denominator, label, MAX_NOTE_VALUE)))
     return points
 
 
@@ -123,14 +129,17 @@ def _kind(route: Element, flags: set[str]) -> TrackKind:
 
 def _locations(session: Element, source_id: str, evidence: Evidence, facts: ProjectFacts, sample_rate: int | None,
                superclock: float | None) -> None:
-    skipped = 0
+    skipped = incomplete = 0
     for number, node in enumerate(session.findall("Locations/Location")):
         flags = set((node.attrib.get("flags") or "").replace(" ", "").split(","))
         if "IsHidden" in flags or not (flags & {"IsMark", "IsRangeMarker", "IsSessionRange", "IsAutoLoop"}):
             continue
         locator = f"Locations/Location[{number}]"
-        start = _position(node.attrib.get("start", ""), sample_rate, superclock)
-        end = _position(node.attrib.get("end", ""), sample_rate, superclock)
+        if "start" not in node.attrib or ("IsMark" not in flags and "end" not in node.attrib):
+            incomplete += 1
+            continue
+        start = _position(node.attrib["start"], sample_rate, superclock)
+        end = None if "IsMark" in flags else _position(node.attrib["end"], sample_rate, superclock)
         name = node.attrib.get("name")
         if "IsMark" in flags:
             if start is None:
@@ -146,6 +155,9 @@ def _locations(session: Element, source_id: str, evidence: Evidence, facts: Proj
         evidence.add(source_id, f"ardour.{kind}", {"name": name, "start": start[0], "end": end[0], "unit": unit},
                      "range", "project", TIME_DOMAINS[unit], locator, facts.method, "extracted", "high",
                      "Stored location range.")
+    if incomplete:
+        evidence.diagnostics.append(Diagnostic("locations_incomplete", "warning",
+            f"{incomplete} locations were skipped because they lack a start (or an end, for ranges).", source_id))
     if skipped:
         evidence.diagnostics.append(Diagnostic("locations_skipped", "warning",
             f"{skipped} locations were skipped because their time unit could not be converted "
@@ -173,7 +185,9 @@ def ardour(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
         facts.application(stamp.strip(), "Session/ProgramVersion/@modified-with")
     sample_rate: int | None = None
     if "sample-rate" in session.attrib:
-        sample_rate = _whole_number(session, "sample-rate", "Session")
+        sample_rate = _whole_number(session, "sample-rate", "Session", SAMPLE_RATES[1])
+        if sample_rate < SAMPLE_RATES[0]:
+            raise ValueError(f"Session sample-rate must be from {SAMPLE_RATES[0]} to {SAMPLE_RATES[1]} Hz")
         facts.sample_rate(sample_rate, "Session/@sample-rate")
     tempo_map = session.find("TempoMap")
     superclock: float | None = None
@@ -181,6 +195,8 @@ def ardour(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
         rate_name = next((name for name in ("superclocks-per-second", "superclock-ticks-per-second")
                           if name in tempo_map.attrib), None)
         superclock = _number(tempo_map, rate_name, "TempoMap") if rate_name else None
+        if superclock is not None and not SUPERCLOCK_RATES[0] <= superclock <= SUPERCLOCK_RATES[1]:
+            raise ValueError(f"TempoMap {rate_name} must be from {SUPERCLOCK_RATES[0]} to {SUPERCLOCK_RATES[1]}")
         tempos = _tempo_points(tempo_map)
         if len(tempos) > 1 and any(beat is None for beat, _ in tempos):
             evidence.diagnostics.append(Diagnostic("tempo_positions_unreadable", "warning",
@@ -193,7 +209,11 @@ def ardour(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
         meters = _meter_points(tempo_map)
         if len(meters) == 1:
             facts.meter(meters[0][1], meters[0][2], "TempoMap/Meter")
-        elif meters and not any(beat is None for beat, _, _ in meters):
+        elif len(meters) > 1 and any(beat is None for beat, _, _ in meters):
+            evidence.diagnostics.append(Diagnostic("meter_positions_unreadable", "warning",
+                "TempoMap has several meters without a readable position (an Ardour 4 or older session), so no meter is claimed.",
+                source_id))
+        elif meters:
             extra("ardour.meter_map", [{"beat": beat, "meter": f"{num}/{den}"} for beat, num, den in sorted(meters)],
                   "meter_map", "TempoMap/Meter", "Stored meter changes in beat order; no single static meter is claimed.",
                   time_domain="project_beats")

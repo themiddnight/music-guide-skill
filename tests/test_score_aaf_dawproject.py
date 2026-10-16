@@ -8,9 +8,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+import signal
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import aaf2
 import jsonschema
@@ -19,6 +22,10 @@ import soundfile as sf
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(SKILL / "scripts"))
+
+from music_guide.adapters import aaf as aaf_adapter  # noqa: E402
+from music_guide.model import Evidence  # noqa: E402
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 
 DOCTYPE = ('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" '
@@ -75,7 +82,7 @@ class ScoreCase(unittest.TestCase):
     def run_cli(self, *args, mixdown=True):
         prefix = ["--mixdown", str(self.mix)] if mixdown else []
         return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *prefix, *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+                              cwd=self.dir, text=True, capture_output=True, timeout=60)
 
     def evidence(self, *args, mixdown=False):
         result = self.run_cli(*args, mixdown=mixdown)
@@ -208,6 +215,86 @@ class MusicXmlTest(ScoreCase):
         data = self.evidence("--project", self.write("binary.musicxml", b"\x00\x01binary"), mixdown=True)
         self.assertEqual(data["sources"][1]["status"], "error")
 
+    def one_part(self, body, attributes="<divisions>1</divisions>", name="one.musicxml"):
+        measure = f'<measure number="1"><attributes>{attributes}</attributes>{body}</measure>'
+        return self.write(name, partwise(measure, "<measure number='1'/>"))
+
+    def test_overflowing_and_exponent_numbers_are_rejected_quickly(self):
+        cases = {
+            "duration-exp.musicxml": (note("C", 4, "1e400"), "duration"),
+            "duration-huge-exp.musicxml": (note("C", 4, "1e10000000"), "duration"),
+            "duration-digits.musicxml": (note("C", 4, "9" * 400), "duration"),
+            "alter-exp.musicxml": (note("C", 4, 1, alter="1e400"), "alter"),
+            "divisions-exp.musicxml": (None, "divisions"),
+        }
+        for name, (body, fragment) in cases.items():
+            with self.subTest(name=name):
+                if body is None:
+                    path = self.one_part(note("C", 4, 1), "<divisions>1e400</divisions>", name)
+                else:
+                    path = self.one_part(body, name=name)
+                self.assert_rejected(self.evidence("--project", path, mixdown=True), fragment, "s2")
+
+    def test_unreadable_note_dynamics_fall_back_to_the_placeholder(self):
+        for text in ("inf", "nan", "1e400", "-5", "loud"):
+            with self.subTest(dynamics=text):
+                data = self.evidence("--project", self.one_part(
+                    note("C", 4, 1).replace("<note>", f'<note dynamics="{text}">')))
+                summary = self.by_scope(data, "project.track_notes")["project_track:0"]
+                self.assertEqual((summary["velocityMin"], summary["velocityMax"]), (90, 90))
+
+    def test_sound_dynamics_set_the_default_velocity_until_changed_and_note_dynamics_win(self):
+        body = ('<sound dynamics="50"/>' + note("C", 4, 1) + note("D", 4, 1).replace("<note>", '<note dynamics="100">')
+                + '<direction><sound dynamics="80"/></direction>' + note("E", 4, 1))
+        data = self.evidence("--project", self.one_part(body), "--detail", "full")
+        notes = {item["value"]["pitch"]: item["value"]["velocity"] for item in data["observations"]
+                 if item["property"] == "project.note"}
+        self.assertEqual(notes, {60: 45, 62: 90, 64: 72})
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "high")
+        self.assertFalse(any(item["code"] == "score_velocity_placeholder" for item in data["diagnostics"]))
+
+    def test_placeholder_velocities_lower_confidence_and_are_counted(self):
+        body = '<sound dynamics="50"/>' + note("C", 4, 1) + note("D", 4, 1)
+        data = self.evidence("--project", self.one_part(note("A", 3, 1) + body))
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("1 of 3 velocities are placeholders", summary["confidenceReason"])
+        counts = self.values(data, "musicxml.velocity_placeholders")
+        self.assertEqual(counts, [{"placeholder": 1, "total": 3, "velocity": 90}])
+        diagnostic = next(item for item in data["diagnostics"] if item["code"] == "score_velocity_placeholder")
+        self.assertIn("1 of 3", diagnostic["message"])
+
+    def test_composite_meter_microtones_octave_transposition_and_early_backup_are_flagged(self):
+        signature = '<time><beats>2</beats><beat-type>4</beat-type><beats>3</beats><beat-type>8</beat-type></time>'
+        data = self.evidence("--project", self.one_part(note("C", 4, 1), "<divisions>1</divisions>" + signature))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertTrue(any(item["code"] == "musicxml_composite_meter" for item in data["diagnostics"]))
+        data = self.evidence("--project", self.one_part(note("C", 4, 1, alter="0.5") + note("D", 4, 1, alter="-0.5")))
+        flag = next(item for item in data["diagnostics"] if item["code"] == "musicxml_microtonal")
+        self.assertIn("2 note", flag["message"])
+        octave = ("<divisions>1</divisions><key><fifths>2</fifths><mode>major</mode></key>"
+                  "<transpose><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>")
+        data = self.evidence("--project", self.one_part(note("C", 4, 1), octave))
+        self.assertEqual(self.values(data, "project.key"), ["D major"])
+        pitch = self.by_scope(data, "project.track_notes")["project_track:0"]["pitchMin"]["midi"]
+        self.assertEqual(pitch, 48)
+        early = note("C", 4, 1) + '<backup><duration>4</duration></backup>' + note("D", 4, 1)
+        data = self.evidence("--project", self.one_part(early))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.by_scope(data, "project.track_notes")["project_track:0"]["noteCount"], 2)
+        self.assertTrue(any(item["code"] == "musicxml_backup_clamped" for item in data["diagnostics"]))
+
+    def test_many_repeated_key_and_meter_marks_stay_linear(self):
+        measures = "".join(f'<measure number="{n}"><attributes><key><fifths>{n % 3}</fifths></key>'
+                           f'<time><beats>{n % 5 + 1}</beats><beat-type>4</beat-type></time></attributes>'
+                           + note("C", 4, 1) + '</measure>' for n in range(1, 55001))
+        measures = measures.replace('<measure number="1">', '<measure number="1"><attributes><divisions>1</divisions></attributes>', 1)
+        started = time.monotonic()
+        data = self.evidence("--project", self.write("many.musicxml", partwise(measures, "<measure number='1'/>")))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertLess(time.monotonic() - started, 12)
+
 
 class MuseScoreTest(ScoreCase):
     SCORE = (
@@ -293,8 +380,33 @@ class MuseScoreTest(ScoreCase):
                 self.assertEqual(data["sources"][1]["status"], "error")
                 self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
 
+    def located(self, fractions):
+        return self.SCORE.replace("<voice><Rest>", f"<voice><location><fractions>{fractions}</fractions></location><Rest>", 1)
 
-def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True):
+    def test_huge_fractions_and_dots_are_rejected_quickly(self):
+        cases = {
+            "fractions-exp.mscz": self.located("1e400"),
+            "fractions-huge-exp.mscz": self.located("1e10000000"),
+            "fractions-digits.mscz": self.located(f"{'9' * 400}/1"),
+            "duration-exp.mscz": self.SCORE.replace("<duration>1/2</duration>", "<duration>1e100000000</duration>"),
+            "dots.mscz": self.SCORE.replace("<dots>1</dots>", "<dots>5000000</dots>"),
+            "tempo-inf.mscz": self.SCORE.replace("<tempo>1.6</tempo>", "<tempo>inf</tempo>"),
+        }
+        for name, score in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.package(name, score), mixdown=True)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+    def test_all_velocities_are_placeholders_and_say_so(self):
+        data = self.evidence("--project", self.package())
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("6 of 6 velocities are placeholders", summary["confidenceReason"])
+        self.assertEqual(self.values(data, "musescore.velocity_placeholders")[0], {"placeholder": 6, "total": 6, "velocity": 80})
+
+
+def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True, unrated=False):
     """A composition with two sound slots, a picture slot, source clips and markers, written by pyaaf2."""
     with aaf2.open(str(path), "w") as f:
         ident = f.header["IdentificationList"].value[0]
@@ -330,6 +442,10 @@ def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True)
             for _ in range(clips):
                 slot.segment.components.append(master.create_source_clip(slot_id=1))
         composition.create_picture_slot(edit_rate=25).name = "Video"
+        if unrated:
+            slot = composition.create_empty_sequence_slot(edit_rate=25, media_kind="sound")
+            slot.name = "No rate"
+            slot["EditRate"].value = aaf2.rational.AAFRational(0, 1)
         if markers:
             event_slot = f.create.EventMobSlot()
             event_slot.slot_id, event_slot.name, event_slot.edit_rate = 9, "Markers", aaf2.rational.AAFRational(48000, 1)
@@ -427,27 +543,109 @@ class AafTest(ScoreCase):
 
     def test_unsupported_and_corrupt_files_are_source_errors(self):
         good = self.make().read_bytes()
-        bomb = bytearray(good)
-        with aaf2.open(str(self.dir / "bomb.aaf"), "w"):
-            pass
-        (self.dir / "bomb.aaf").write_bytes(bytes(bomb))
-        with aaf2.open(str(self.dir / "bomb.aaf"), "rw") as f:
-            index = next(entry for entry in f.cfb.listdir_dict("/Header-2/Content-3b03").values()
-                         if entry.name.endswith(" index"))
-            stream = index.open("rw")
-            stream.write(struct.pack("<I", 0xFFFFFFFF))
         cases = {
             "xml.aaf": (b'<?xml version="1.0"?><AAF/>', "XML"),
             "text.aaf": (b"\xd0\xcf\x11\xe0 not quite", "does not match"),
             "truncated.aaf": (good[:4096], "cannot read AAF"),
             "header.aaf": (good[:512], "cannot read AAF"),
             "zeroed.aaf": (good[:8] + bytes(len(good) - 8), "cannot read AAF"),
-            "bomb.aaf": ((self.dir / "bomb.aaf").read_bytes(), "AAF parser stopped"),
         }
         for name, (content, fragment) in cases.items():
             with self.subTest(name=name):
                 data = self.evidence("--project", self.write(name, content), mixdown=True)
                 self.assert_rejected(data, fragment, "s2")
+
+    def make_bomb(self):
+        """An index that claims 4 billion entries: pyaaf2 allocates memory in proportion to the claim."""
+        path = self.dir / "bomb.aaf"
+        with aaf2.open(str(path), "w"):
+            pass
+        with aaf2.open(str(path), "rw") as f:
+            index = next(entry for entry in f.cfb.listdir_dict("/Header-2/Content-3b03").values()
+                         if entry.name.endswith(" index"))
+            index.open("rw").write(struct.pack("<I", 0xFFFFFFFF))
+        return path
+
+    def run_adapter(self, path, **limits):
+        evidence = Evidence()
+        aaf_adapter.aaf(path, "s1", evidence, "summary", **limits)
+        return evidence
+
+    def test_memory_limit_stops_a_parser_that_over_allocates(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*needed more than 256 MiB"):
+            self.run_adapter(self.make_bomb(), memory_bytes=256 * 1024 * 1024)
+        self.assertLess(time.monotonic() - started, 40)
+
+    def test_time_limit_stops_the_parser(self):
+        with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*took longer than 0.05 seconds"):
+            self.run_adapter(self.make(), timeout_seconds=0.05)
+        self.assertEqual(self.run_adapter(self.make(), timeout_seconds=30).observations[0].property, "project.application")
+
+    def test_child_ends_itself_at_its_own_deadline(self):
+        config = {"paths": aaf_adapter.child_sys_path(), "path": str(self.make_bomb()), "sourceId": "s1",
+                  "detail": "summary", "deadline": 1, "memory": 8 * 1024 ** 3}
+        started = time.monotonic()
+        child = subprocess.run([sys.executable, "-I", "-c", aaf_adapter.CHILD_CODE], input=json.dumps(config).encode(),
+                               capture_output=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 30)
+        deadline_status = (-signal.SIGALRM, aaf_adapter.DEADLINE_EXIT) if hasattr(signal, "SIGALRM") else (aaf_adapter.DEADLINE_EXIT,)
+        self.assertIn(child.returncode, deadline_status)
+
+    def test_child_sees_the_parents_import_path(self):
+        shim = self.dir / "shim"
+        (shim / "aaf2").mkdir(parents=True)
+        (shim / "aaf2" / "__init__.py").write_text('raise ImportError("shim aaf2 was loaded")\n')
+        result = subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(self.mix),
+                                 "--project", str(self.make())], cwd=self.dir, text=True, capture_output=True,
+                                env={**os.environ, "PYTHONPATH": str(shim)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assert_rejected(data, "shim aaf2 was loaded", "s2")
+        plain = self.evidence("--project", self.make("plain.aaf"))
+        self.assertEqual(plain["sources"][0]["status"], "ok")
+
+    def test_child_import_path_drops_the_working_directory_and_relative_entries(self):
+        elsewhere = self.dir / "site"
+        elsewhere.mkdir()
+        original = sys.path[:]
+        self.addCleanup(lambda: sys.path.__setitem__(slice(None), original))
+        sys.path[:] = ["", ".", "relative", str(self.dir), str(elsewhere), *original]
+        previous = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        chosen = aaf_adapter.child_sys_path()
+        self.assertEqual(chosen[0], str(aaf_adapter.SCRIPTS_DIR))
+        self.assertIn(str(elsewhere), chosen)
+        for dropped in ("", ".", "relative", str(self.dir)):
+            self.assertNotIn(dropped, chosen)
+
+    def test_parent_does_not_import_pyaaf2(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import music_guide.cli, music_guide.adapters.aaf; "
+                "print('aaf2' in sys.modules)")
+        result = subprocess.run([sys.executable, "-c", code, str(SKILL / "scripts")], capture_output=True, text=True)
+        self.assertEqual((result.stdout.strip(), result.returncode), ("False", 0), result.stderr)
+
+    def test_child_output_is_read_with_a_bound(self):
+        import io
+        reader = aaf_adapter._Reader(io.BytesIO(b"x" * 100_000), 1000)
+        reader.run()
+        self.assertTrue(reader.overflow)
+        self.assertEqual(len(reader.data), 1000)
+
+    def test_a_missing_memory_monitor_is_reported(self):
+        with mock.patch.object(aaf_adapter, "_memory_poller", return_value=None):
+            evidence = self.run_adapter(self.make())
+        notices = [item for item in evidence.diagnostics if item.code == "aaf_memory_cap_unavailable"]
+        self.assertEqual(len(notices), 0 if sys.platform.startswith("linux") else 1)
+        self.assertEqual(len([item for item in self.run_adapter(self.make()).diagnostics
+                              if item.code == "aaf_memory_cap_unavailable"]), 0)
+
+    def test_slots_without_an_edit_rate_are_counted(self):
+        data = self.evidence("--project", self.make(unrated=True))
+        warning = next(item for item in data["diagnostics"] if item["code"] == "aaf_slots_without_edit_rate")
+        self.assertIn("1 slot", warning["message"])
+        self.assertEqual(self.values(data, "project.track_count"), [3])
 
 
 def daw_note(time, duration, key, vel="0.5", channel=0):
@@ -584,6 +782,63 @@ class DawProjectTest(ScoreCase):
                 self.assertEqual(self.values(data, "project.track_count"), [3])
                 self.assertTrue(any(item["code"] == "dawproject_metadata_unreadable" for item in data["diagnostics"]))
         self.assertEqual(self.values(self.evidence("--project", self.project(metadata=None)), "project.track_count"), [3])
+
+    def arrangement(self, body, tempo=""):
+        return DAW_HEAD + DAW_STRUCTURE + f'<Arrangement>{tempo}{body}</Arrangement></Project>'
+
+    def test_astronomical_numbers_are_errors_not_overflows(self):
+        lane = '<Lanes track="t1"><Clips>{}</Clips></Lanes>'
+        huge_note = lambda time, duration: (f'<Clip time="0" duration="8"><Notes><Note time="{time}" duration="{duration}" '
+                                            'channel="0" key="60" vel="0.5"/></Notes></Clip>')
+        ramp = ('<TempoAutomation unit="bpm" timeUnit="beats"><RealPoint time="0" value="{}" interpolation="hold"/>'
+                '<RealPoint time="{}" value="60" interpolation="hold"/></TempoAutomation>')
+        cases = {
+            "note-time": (lane.format(huge_note("1e308", "1e308")), ""),
+            "note-duration": (lane.format(huge_note("0", "1e308")), ""),
+            "clip-time": (lane.format('<Clip time="1e308" duration="1e308"/>'), ""),
+            "marker": ('<Markers timeUnit="beats"><Marker time="1e308" name="x"/></Markers>', ""),
+            "tempo-time": (lane.format(huge_note("0", "1")), ramp.format("120", "1e308")),
+            "tiny-tempo-seconds": (lane.format('<Clip time="1" duration="2" contentTimeUnit="seconds"><Notes>'
+                                               + daw_note(1, 1, 60) + '</Notes></Clip>'), ramp.format("1e-320", "16")),
+        }
+        for name, (body, tempo) in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.project(self.arrangement(body, tempo)), mixdown=True)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+    def test_placeholder_velocities_are_counted_and_lower_confidence(self):
+        silent = '<Note time="2" duration="1" channel="0" key="62"/>'
+        body = ('<Lanes track="t1"><Clips><Clip time="0" duration="8"><Notes>' + daw_note(0, 1, 60) + silent
+                + '</Notes></Clip></Clips></Lanes>')
+        data = self.evidence("--project", self.project(self.arrangement(body)))
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("1 of 2 velocities are placeholders", summary["confidenceReason"])
+        self.assertEqual(self.values(data, "dawproject.velocity_placeholders"), [{"placeholder": 1, "total": 2, "velocity": 100}])
+        self.assertIn("1 note", next(item for item in data["diagnostics"]
+                                     if item["code"] == "dawproject_placeholder_velocity")["message"])
+        stored = self.evidence("--project", self.project())
+        self.assertEqual({item["confidence"] for item in stored["observations"] if item["property"] == "project.track_notes"}, {"high"})
+        self.assertFalse(any(item["code"] == "dawproject_placeholder_velocity" for item in stored["diagnostics"]))
+
+    def test_tempo_ramps_are_declared_even_without_notes_and_lower_note_confidence(self):
+        ramp = ('<TempoAutomation unit="bpm" timeUnit="beats"><RealPoint time="0" value="120" interpolation="linear"/>'
+                '<RealPoint time="16" value="60" interpolation="hold"/></TempoAutomation>')
+        empty = self.evidence("--project", self.project(self.arrangement('<Lanes track="t1"><Clips/></Lanes>', ramp)))
+        notice = next(item for item in empty["diagnostics"] if item["code"] == "dawproject_tempo_ramp_approximation")
+        self.assertIn("mean tempo", notice["message"])
+        body = ('<Lanes track="t1"><Clips><Clip time="0" duration="8"><Notes>' + daw_note(0, 1, 60) + '</Notes></Clip></Clips></Lanes>'
+                '<Lanes track="t3"><Clips><Clip time="4" duration="8" contentTimeUnit="seconds"><Notes>' + daw_note(1, 1, 64)
+                + '</Notes></Clip></Clips></Lanes>')
+        data = self.evidence("--project", self.project(self.arrangement(body, ramp)))
+        summaries = {item["scope"]: item for item in data["observations"] if item["property"] == "project.track_notes"}
+        self.assertEqual(summaries["project_track:0"]["confidence"], "high")
+        self.assertEqual(summaries["project_track:2"]["confidence"], "medium")
+        self.assertIn("mean tempo", summaries["project_track:2"]["confidenceReason"])
+        hold = ramp.replace('interpolation="linear"', 'interpolation="hold"')
+        quiet = self.evidence("--project", self.project(self.arrangement(body, hold)))
+        self.assertFalse(any(item["code"] == "dawproject_tempo_ramp_approximation" for item in quiet["diagnostics"]))
 
     def test_malformed_arrangements_are_rejected_atomically(self):
         def project(arrangement):
