@@ -643,6 +643,52 @@ class ArdourSessionTest(ProjectCliCase):
         self.assertEqual(self.values(data, "project.sample_rate"), [])
         self.assertTrue(any(item["code"] == "locations_skipped" for item in data["diagnostics"]))
 
+    def test_oversized_position_numbers_are_errors_not_crashes(self):
+        digits = "9" * 400
+        for label, start in (("sample", digits), ("superclock", f"a{digits}"), ("ticks", f"b{digits}")):
+            with self.subTest(label=label):
+                locations = f'<Location id="1" name="x" start="{start}" end="{start}" flags="IsMark"/>'
+                session = ardour_session(8000, ARDOUR8_TEMPO, locations)
+                self.failed(self.write(f"{label}.ardour", session))
+
+    def test_incomplete_locations_are_skipped_with_a_count(self):
+        locations = """
+          <Location id="1" name="Verse" start="96000" end="96000" flags="IsMark"/>
+          <Location id="2" name="No start" end="96000" flags="IsMark"/>
+          <Location id="3" name="Range no end" start="0" flags="IsRangeMarker"/>
+          <Location id="4" name="Range" start="0" end="48000" flags="IsRangeMarker"/>"""
+        data = self.project(self.write("partial.ardour", ardour_session(6000, ARDOUR6_TEMPO, locations)))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "project.marker"), [{"name": "Verse", "position": 2, "unit": "seconds"}])
+        self.assertEqual(self.values(data, "ardour.range"), [{"name": "Range", "start": 0, "end": 1, "unit": "seconds"}])
+        incomplete = next(item for item in data["diagnostics"] if item["code"] == "locations_incomplete")
+        self.assertIn("2 locations", incomplete["message"])
+
+    def test_implausible_rates_and_meters_are_errors(self):
+        good = ardour_session(6000, ARDOUR6_TEMPO)
+        cases = {
+            "rate-low.ardour": good.replace('sample-rate="48000"', 'sample-rate="500"'),
+            "rate-high.ardour": good.replace('sample-rate="48000"', 'sample-rate="2000000"'),
+            "bar-100.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="100"'),
+            "bar-0.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="0"'),
+        }
+        eight = ardour_session(8000, ARDOUR8_TEMPO)
+        for rate in ("-282240000", "0", "1e999", "nan"):
+            cases[f"superclock-{rate}.ardour"] = eight.replace('superclocks-per-second="282240000"', f'superclocks-per-second="{rate}"')
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                self.failed(self.write(name, text))
+
+    def test_several_meters_without_readable_positions_are_reported(self):
+        old = """<TempoMap>
+            <Tempo start="1|1|0" beats-per-minute="120.000000" note-type="4.000000" movable="0"/>
+            <Meter start="1|1|0" beats-per-bar="4.000000" note-type="4.000000" movable="0"/>
+            <Meter start="5|1|0" beats-per-bar="3.000000" note-type="4.000000" movable="1"/>
+          </TempoMap>"""
+        data = self.project(self.write("meters.ardour", ardour_session(3000, old)))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertTrue(any(item["code"] == "meter_positions_unreadable" for item in data["diagnostics"]))
+
     def test_malformed_and_unsafe_sessions_are_errors(self):
         good = ardour_session(6000, ARDOUR6_TEMPO)
         cases = {
