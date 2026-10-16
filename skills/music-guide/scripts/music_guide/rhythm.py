@@ -136,13 +136,16 @@ def _metric_pattern(meter: Meter, subdivision: int) -> tuple[tuple[int, ...], tu
         raise ValueError(f"{meter.numerator}/{meter.denominator} cannot be placed on sixteenths")
     weights = tuple(meter.weights(int(per_unit)))
     stronger: list[int | None] = [None] * len(weights)
-    stack: list[int] = []
+    next_bar = len(weights)
+    extended_weights = weights + (0,)
+    stack = [next_bar]
     for tick in range(len(weights) - 1, -1, -1):
-        while stack and weights[stack[-1]] <= weights[tick]:
+        while stack and extended_weights[stack[-1]] <= weights[tick]:
             stack.pop()
         stronger[tick] = stack[-1] if stack else None
         stack.append(tick)
-    upper = sum(weights[ahead] - weights[tick] for tick, ahead in enumerate(stronger) if ahead is not None)
+    upper = sum(weights[ahead] - weights[tick] for tick, ahead in enumerate(stronger)
+                if ahead is not None and ahead < next_bar)
     return weights, tuple(stronger), max(4 * meter.numerator, upper)
 
 
@@ -172,12 +175,17 @@ def syncopation_on_grid(onsets_in_beats: Sequence[float], grid: BarGrid, subdivi
         bounds[beat] = following
     for bar, (meter, ticks) in placed.items():
         weights, stronger, _ = _metric_pattern(meter, subdivision)
+        following_ticks = placed[bar + 1][1] if bar + 1 in placed else ()
+        following_onset = min((tick_times[(bar + 1, position)] for position in following_ticks), default=None)
         for tick in ticks:
             here = tick_times[(bar, tick)]
             if here not in bounds or bounds[here] - here > meter.numerator * 4 / meter.denominator:
                 continue
             ahead = stronger[tick]
-            if ahead is not None and ahead not in ticks:
+            if (ahead == len(weights) and following_onset is not None and 0 not in following_ticks
+                    and following_onset - here <= meter.numerator * 4 / meter.denominator):
+                score -= weights[tick]
+            elif ahead is not None and ahead < len(weights) and ahead not in ticks:
                 score += weights[ahead] - weights[tick]
     max_per_bar = max(_metric_pattern(meter, subdivision)[2] for meter, _ in placed.values())
     return round(score / (max_per_bar * len(placed)), 6)
