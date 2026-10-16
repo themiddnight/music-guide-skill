@@ -327,5 +327,23 @@ class InterpreterVersionTest(CliCase):
         self.assertIn("Python 3.10 or newer", result.stderr)
 
 
+class DuplicateKeyTest(CliCase):
+    def test_declarations_reject_repeated_keys_like_solna(self):
+        repeated = self.write("dup.json", '[{"property": "tempo", "value": 90, "value": 120, "unit": "BPM", "scope": "project"}]')
+        data = self.evidence("--declarations", repeated)
+        self.assertEqual(data["sources"][-1]["status"], "error")
+        message = next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error")
+        self.assertIn("duplicate JSON key: value", message)
+        self.assertFalse([item for item in data["observations"] if item["provenance"] == "user_declared"])
+
+    def test_declarations_still_accept_unique_keys_and_reject_nonfinite_literals(self):
+        good = self.write("ok.json", '[{"property": "tempo", "value": 90, "unit": "BPM", "scope": "project"}]')
+        data = self.evidence("--declarations", good)
+        self.assertEqual([item["value"] for item in data["observations"] if item["provenance"] == "user_declared"], [90])
+        bad = self.write("nan.json", '[{"property": "tempo", "value": NaN, "unit": "BPM", "scope": "project"}]')
+        data = self.evidence("--declarations", bad)
+        self.assertIn("nonfinite", next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error"))
+
+
 if __name__ == "__main__":
     unittest.main()

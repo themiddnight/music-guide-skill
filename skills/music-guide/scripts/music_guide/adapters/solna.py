@@ -1,19 +1,10 @@
 from __future__ import annotations
-import json
 from pathlib import Path
 from ..model import Detail, Evidence
-from .common import MAX_JSON_BYTES, _read_bounded, _finite_number
+from .common import MAX_JSON_BYTES, _finite_number, _load_json, _read_bounded
 
 def solna(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
-    def no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON key: {key}")
-            result[key] = value
-        return result
-    data = json.loads(_read_bounded(path, MAX_JSON_BYTES), object_pairs_hook=no_duplicates,
-                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"nonfinite JSON value: {value}")))
+    data = _load_json(_read_bounded(path, MAX_JSON_BYTES))
     if not isinstance(data, dict):
         raise ValueError("SOLNA root must be an object")
     version = data.get("formatVersion")

@@ -14,7 +14,7 @@ from defusedxml.common import DefusedXmlException
 
 from . import formats
 from .adapters import audio
-from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_ZIP_BYTES, _read_bounded
+from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_ZIP_BYTES, _load_json, _read_bounded
 from .formats import ProjectFormat
 from .model import Detail, Diagnostic, Evidence, Source, detect_conflicts
 
@@ -32,8 +32,7 @@ def _hash(path: Path) -> str:
 
 
 def _load_declarations(path: Path, evidence: Evidence) -> None:
-    data = json.loads(_read_bounded(path, MAX_JSON_BYTES),
-                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"nonfinite declaration: {value}")))
+    data = _load_json(_read_bounded(path, MAX_JSON_BYTES))
     if not isinstance(data, list) or len(data) > 1000:
         raise ValueError("declarations must be a bounded JSON array")
     source_id = f"s{len(evidence.sources) + 1}"

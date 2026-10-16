@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import math
 import re
 import zipfile
@@ -39,6 +40,24 @@ def _finite_number(value: object, label: str, positive: bool = False) -> float:
     if not math.isfinite(number) or (positive and number <= 0):
         raise ValueError(f"{label} must be a finite positive number" if positive else f"{label} must be finite")
     return number
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> object:
+    raise ValueError(f"nonfinite JSON value: {value}")
+
+
+def _load_json(raw: bytes) -> object:
+    """Parses JSON that is data: a repeated key or a NaN/Infinity literal is an error, never a silent last-wins."""
+    return json.loads(raw, object_pairs_hook=_no_duplicate_keys, parse_constant=_reject_constant)
 
 
 MAX_GZIP_BYTES = 64 * 1024 * 1024
