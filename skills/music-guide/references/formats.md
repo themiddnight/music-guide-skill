@@ -28,7 +28,7 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 | Cubase, Nuendo | `.cpr`, `.npr` | Inventory; export DAWproject (Cubase 14+) or MIDI |
 | Ableton Live | `.als` | Inventory; export stems and MIDI |
 | REAPER | `.rpp` | Inventory; render stems and export MIDI |
-| FL Studio | `.flp` | Inventory; export stems and MIDI |
+| FL Studio | `.flp` | Parsed: tempo, channels, patterns, pattern notes, playlist counts. Export stems and MIDI for the sound |
 | Studio One | `.song` | Inventory; export DAWproject (6.5+) or stems and MIDI |
 | Ardour | `.ardour` | Inventory; export stems and MIDI |
 | LMMS | `.mmp`, `.mmpz` | Inventory; export audio and MIDI |
@@ -52,3 +52,9 @@ DAWproject transport tempo requires an explicit `unit="bpm"`. Other units and mi
 Time domains in reports: `static` (one value for the scope), `midi_ticks` (positioned by MIDI ticks), `project_beats` and `project_seconds` (positioned in a project timeline), and `loop_sequence` (ordered inside a stored loop).
 
 Do not launch a DAW, execute a plugin, decode proprietary data without a tested parser, or follow media paths as a shortcut. Ask for WAV, MIDI, stems, or an explicitly supported export instead.
+
+## FL Studio, Studio One and Cubase
+
+These three formats are undocumented, so each adapter records how far it was checked. No adapter loads a plugin, opens a media path or reads a file other than the project.
+
+**FL Studio (`.flp`).** Reads the event stream (header `FLhd`, data `FLdt`, event IDs 0-63 byte, 64-127 word, 128-191 dword, 192-255 length-prefixed). Reports `project.application`, `tempo` (event 156, BPM x 1000, or the legacy whole-BPM event 66; confidence medium), `meter` (events 17 and 18, confidence low because the meaning is a single-source reading), channels as `project.track` with `flstudio.channel`, channel plugin and mixer slot names as `project.plugin`, sample basenames, `flstudio.pattern` and per-pattern `flstudio.pattern_notes` (confidence medium, beats are quarter notes inside the pattern), `flstudio.arrangement` playlist counts, and title, genre, artists and comments. Note pitch is FL's key number, which equals the MIDI note number (FL names MIDI 60 C5; reports name it C4). `--detail full` adds `flstudio.note` in the `pattern_beats` time domain, which is positioned inside a pattern, not on the arrangement timeline. Not decoded: tempo automation, time markers, plugin state, which insert holds which slot, and where patterns sit in time. Sources: PyFLP documentation and source (pyflp.readthedocs.io), node-flp (github.com/andrewrk/node-flp). No real project was available, so tests use synthetic files.

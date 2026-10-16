@@ -1,0 +1,249 @@
+"""FL Studio, Studio One and Cubase adapters, exercised through the CLI with small synthetic projects."""
+
+from __future__ import annotations
+
+import json
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+import jsonschema
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILL = ROOT / "skills" / "music-guide"
+SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
+sys.path.insert(0, str(SKILL / "scripts"))
+
+from music_guide.adapters import flstudio  # noqa: E402
+
+
+class ProjectCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
+                              cwd=self.dir, text=True, capture_output=True)
+
+    def evidence(self, *args):
+        result = self.run_cli(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        data = json.loads(result.stdout)
+        jsonschema.validate(data, SCHEMA)
+        return data
+
+    def project(self, path, *extra):
+        return self.evidence("--project", path, *extra)
+
+    @staticmethod
+    def values(data, property):
+        return [item["value"] for item in data["observations"] if item["property"] == property]
+
+    @staticmethod
+    def items(data, property):
+        return [item for item in data["observations"] if item["property"] == property]
+
+    def assert_rejected(self, path, *fragments):
+        data = self.project(path)
+        self.assertEqual(data["sources"][0]["status"], "error")
+        self.assertEqual(data["observations"], [])
+        for fragment in fragments:
+            self.assertIn(fragment, self.error_message(data))
+
+    @staticmethod
+    def error_message(data):
+        return next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error")
+
+    def declare_tempo(self, bpm):
+        path = self.dir / "declarations.json"
+        path.write_text(json.dumps([{"property": "tempo", "value": bpm, "unit": "BPM", "scope": "project"}]))
+        return path
+
+
+def varint(value):
+    out = bytearray()
+    while True:
+        byte, value = value & 0x7F, value >> 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def event(event_id, payload):
+    if event_id < 64:
+        assert len(payload) == 1
+    elif event_id < 128:
+        assert len(payload) == 2
+    elif event_id < 192:
+        assert len(payload) == 4
+    else:
+        return bytes([event_id]) + varint(len(payload)) + payload
+    return bytes([event_id]) + payload
+
+
+def byte(event_id, value):
+    return event(event_id, bytes([value]))
+
+
+def word(event_id, value):
+    return event(event_id, struct.pack("<H", value))
+
+
+def dword(event_id, value):
+    return event(event_id, struct.pack("<I", value))
+
+
+def text(event_id, value, utf16=True):
+    return event(event_id, (value + "\0").encode("utf-16-le" if utf16 else "ascii"))
+
+
+def note(position, length, key, velocity=100, rack=0):
+    return struct.pack("<IHHIHHBBBBBBBB", position, 0, rack, length, key, 0, 120, 0, 64, 0, 64, velocity, 128, 128)
+
+
+def playlist_item(position, length, item_index, track=499, size=32):
+    item = struct.pack("<IHHIHH2sH4sff", position, 20480, item_index, length, track, 0, b"x\0", 64, b"@d\x80\x80", 0.0, -1.0)
+    return item + bytes(size - len(item))
+
+
+def flp(events, version="20.8.3.2304", ppq=96, channels=2, size_delta=0, header_size=6):
+    body = b"".join(events)
+    return (b"FLhd" + struct.pack("<IhHH", header_size, 0, channels, ppq) + b"FLdt"
+            + struct.pack("<I", len(body) + size_delta) + body)
+
+
+def fl_events(version="20.8.3.2304", playlist_size=32):
+    utf16 = tuple(int(part) for part in version.split(".")[:2]) >= (11, 5)
+
+    def label(event_id, value):
+        return text(event_id, value, utf16)
+    return [
+        event(199, (version + "\0").encode("ascii")), dword(156, 128_000), byte(17, 4), byte(18, 4),
+        label(194, "Test Song"), label(206, "Ambient"), label(207, "Ada"),
+        word(64, 0), byte(21, 4), label(201, "3x Osc"), label(203, "Lead"),
+        word(64, 1), byte(21, 0), label(192, "Kick"), label(196, "C:\\Samples\\Drums\\Kick One.wav"),
+        word(65, 1), label(193, "Verse"),
+        event(224, note(0, 96, 60) + note(96, 96, 64, 90, 1) + note(192, 0, 67)),
+        word(99, 1), label(241, "Main"),
+        event(233, playlist_item(0, 384, 20481, size=playlist_size) + playlist_item(384, 96, 1, 498, playlist_size)),
+        word(98, 0), label(201, "Fruity Reeverb 2"), label(204, "Drums"),
+    ]
+
+
+class FlStudioTest(ProjectCliTest):
+    def write(self, name="song.flp", **kwargs):
+        path = self.dir / name
+        path.write_bytes(flp(kwargs.pop("events", None) or fl_events(), **kwargs))
+        return path
+
+    def test_project_facts_and_pattern_summary(self):
+        data = self.project(self.write())
+        source = data["sources"][0]
+        self.assertEqual((source["adapter"], source["status"]), ("fl-studio-flp", "ok"))
+        self.assertEqual(self.values(data, "project.application"), ["FL Studio 20.8.3.2304"])
+        tempo = self.items(data, "tempo")[0]
+        self.assertEqual((tempo["value"], tempo["unit"], tempo["confidence"]), (128.0, "BPM", "medium"))
+        meter = self.items(data, "meter")[0]
+        self.assertEqual((meter["value"], meter["confidence"]), ("4/4", "low"))
+        self.assertEqual(self.values(data, "flstudio.header"), [{"format": 0, "channelCount": 2, "ppq": 96}])
+        self.assertEqual(self.values(data, "flstudio.title"), ["Test Song"])
+        self.assertEqual(self.values(data, "flstudio.genre"), ["Ambient"])
+        self.assertEqual(self.values(data, "flstudio.artists"), ["Ada"])
+        self.assertEqual(self.values(data, "project.track_count"), [2])
+        self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
+            "project_track:0": {"name": "Lead", "kind": "instrument", "index": 0},
+            "project_track:1": {"name": "Kick", "kind": "audio", "index": 1}})
+        self.assertEqual([(item["value"], item["scope"]) for item in self.items(data, "project.plugin")],
+                         [({"name": "3x Osc", "track": 0}, "project_track:0"),
+                          ({"name": "Fruity Reeverb 2", "track": None}, "project")])
+        self.assertEqual(self.values(data, "project.media_reference"), [{"basename": "Kick One.wav", "count": 1}])
+        self.assertEqual(self.values(data, "flstudio.mixer_insert_name"), ["Drums"])
+        self.assertEqual(self.values(data, "flstudio.pattern"), [{"id": 1, "name": "Verse", "noteCount": 3}])
+        summary = self.items(data, "flstudio.pattern_notes")[0]
+        self.assertEqual((summary["scope"], summary["confidence"], summary["timeDomain"]),
+                         ("flstudio_pattern:1", "medium", "static"))
+        self.assertEqual((summary["value"]["noteCount"], summary["value"]["endBeat"], summary["value"]["rackChannelIds"]),
+                         (3, 2, [0, 1]))
+        self.assertEqual(self.values(data, "flstudio.arrangement"), [
+            {"index": 0, "name": "Main", "itemCount": 2, "patternItemCount": 1, "channelItemCount": 1, "spanBeats": 5.0}])
+        self.assertEqual(self.values(data, "project.clip_count"), [2])
+        self.assertEqual(self.items(data, "flstudio.note"), [])
+        self.assertTrue(any(item["code"] == "flp_zero_length_notes" for item in data["diagnostics"]))
+
+    def test_full_detail_lists_every_note_in_pattern_time(self):
+        notes = self.items(self.project(self.write(), "--detail", "full"), "flstudio.note")
+        self.assertEqual([(item["value"]["pitch"], item["value"]["startBeat"], item["value"]["endBeat"]) for item in notes],
+                         [(60, 0.0, 1.0), (64, 1.0, 2.0), (67, 2.0, 2.0)])
+        self.assertEqual({(item["timeDomain"], item["scope"]) for item in notes}, {("pattern_beats", "flstudio_pattern:1")})
+
+    def test_tempo_conflicts_with_declaration(self):
+        data = self.project(self.write(), "--declarations", self.declare_tempo(140))
+        self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
+        self.assertEqual(self.project(self.write(), "--declarations", self.declare_tempo(128))["conflicts"], [])
+
+    def test_new_playlist_item_size_and_legacy_tempo_and_ascii_strings(self):
+        data = self.project(self.write(events=fl_events("21.0.3.3517", playlist_size=60), name="new.flp"))
+        self.assertEqual(self.values(data, "flstudio.arrangement")[0]["itemCount"], 2)
+        old = [event(199, b"9.1.0\0"), word(66, 120), text(194, "Old Song", utf16=False), word(64, 0), byte(21, 2),
+               text(196, "kick.wav", utf16=False)]
+        data = self.project(self.write(events=old, name="old.flp", channels=1))
+        self.assertEqual(self.values(data, "tempo"), [120.0])
+        self.assertIn("event 66", self.items(data, "tempo")[0]["locator"])
+        self.assertEqual(self.values(data, "flstudio.title"), ["Old Song"])
+        self.assertEqual(self.values(data, "project.track"), [{"name": None, "kind": "audio", "index": 0}])
+        self.assertEqual(self.values(data, "meter"), [])
+
+    def test_rejects_malformed_and_oversized_input(self):
+        complete = flp(fl_events())
+        cases = {
+            "cut.flp": (complete[:-3], "data chunk declares"),
+            "cut-event.flp": (flp(fl_events()[:-1] + [fl_events()[-1][:-2]]), "truncated or corrupt"),
+            "oversized-chunk.flp": (flp(fl_events(), size_delta=10_000), "data chunk declares"),
+            "oversized-text.flp": (flp([event(199, b"20.8.3.2304\0"), bytes([194]) + varint(2**31) + b"x"]), "declares"),
+            "endless-varint.flp": (flp([event(199, b"20.8.3.2304\0"), bytes([194]) + b"\xff" * 8]), "invalid length"),
+            "mid-varint.flp": (flp([event(199, b"20.8.3.2304\0"), bytes([194, 0x80])]), "ends inside its length"),
+            "no-version.flp": (flp([dword(156, 128_000)]), "no FL Studio version"),
+            "bad-version.flp": (flp([event(199, b"beta\0")]), "not in major.minor.patch"),
+            "bad-header.flp": (flp(fl_events(), header_size=7), "header is malformed"),
+            "zero-ppq.flp": (flp(fl_events(), ppq=0), "invalid PPQ"),
+        }
+        for name, (content, fragment) in cases.items():
+            with self.subTest(name=name):
+                (self.dir / name).write_bytes(content)
+                self.assert_rejected(self.dir / name, fragment)
+        (self.dir / "fake.flp").write_bytes(b"FLhd\x06\x00")
+        data = self.project(self.dir / "fake.flp")
+        self.assertEqual(data["sources"][0]["status"], "error")
+        self.assertIn("does not match", self.error_message(data))
+
+    def test_skips_bad_notes_without_losing_the_project(self):
+        events = fl_events()
+        events[events.index(event(224, note(0, 96, 60) + note(96, 96, 64, 90, 1) + note(192, 0, 67)))] = event(
+            224, note(0, 96, 60) + note(96, 96, 200) + b"\0")
+        data = self.project(self.write(events=events))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.items(data, "flstudio.pattern_notes"), [])
+        self.assertTrue(any(item["code"] == "flp_event_skipped" for item in data["diagnostics"]))
+        with_key = fl_events()
+        with_key[with_key.index(event(224, note(0, 96, 60) + note(96, 96, 64, 90, 1) + note(192, 0, 67)))] = event(
+            224, note(0, 96, 60) + note(96, 96, 200))
+        data = self.project(self.write(events=with_key, name="key.flp"))
+        self.assertEqual(self.values(data, "flstudio.pattern"), [{"id": 1, "name": "Verse", "noteCount": 1}])
+        self.assertTrue(any("key 200" in item["message"] for item in data["diagnostics"]))
+
+    def test_detect_requires_both_chunk_tags(self):
+        path = self.write()
+        self.assertTrue(flstudio.detect(path))
+        path.write_bytes(path.read_bytes()[:14] + b"XXXX" + path.read_bytes()[18:])
+        self.assertFalse(flstudio.detect(path))
+
+
+if __name__ == "__main__":
+    unittest.main()
