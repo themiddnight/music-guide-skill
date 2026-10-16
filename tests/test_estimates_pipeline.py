@@ -74,10 +74,12 @@ class PipelineTest(unittest.TestCase):
         for rate in (8000, 22050, 32000, 48000):
             with self.subTest(rate=rate):
                 recorded = record(np.random.default_rng(rate).standard_normal(60 * rate) * 0.1, rate, chunk=65536)
-                actual = recorded.onset.nbytes + recorded.pcp.nbytes + recorded.flux.nbytes
+                actual = sum(getattr(recorded, field).nbytes for field in
+                             ('onset', 'pcp', 'flux', 'treble', 'bass', 'treble_narrow', 'activations', 'timbre', 'brightness'))
+                actual += 4 * len(recorded.pcp)  # Optional loudness rows in the conservative projection.
                 self.assertAlmostEqual(store.projected_bytes(60, rate) / actual, 1, delta=0.01)
-                # 61.4 MiB at 16 and 32 kHz, whose decimated rate gives the most onset frames.
-                self.assertLess(store.projected_bytes(6 * 3600, rate), 62 * 2 ** 20)
+                # Chroma, timbre and thirty minutes of note activations remain bounded.
+                self.assertLess(store.projected_bytes(6 * 3600, rate), 400 * 2 ** 20)
 
     def test_a_wrong_header_frame_count_does_not_change_the_store(self):
         samples = np.random.default_rng(5).standard_normal((7 * RATE, 2)) * 0.1
