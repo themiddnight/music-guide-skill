@@ -4,6 +4,7 @@ import io
 import re
 import sys
 from bisect import bisect_right
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, NamedTuple
@@ -12,6 +13,7 @@ from ..model import Detail, Diagnostic, Evidence
 from ..notes import Note
 from ..project import ProjectFacts, TrackKind
 from .common import MAX_ZIP_BYTES, _finite_number, _read_bounded
+from .graded import GradedFacts
 from .listing import capped
 
 METHOD = "reaper-rpp-text"
@@ -25,6 +27,8 @@ EPSILON = 1e-9
 TOKEN = re.compile(r"\"([^\"]*)\"|'([^']*)'|`([^`]*)`|(\S+)")
 KEYWORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 QUOTES = "\"'`"
+ONE_DATA_BYTE = frozenset({0xC0, 0xD0})
+SQUARE_SHAPE = "1"
 
 
 class Prop(NamedTuple):
@@ -133,7 +137,7 @@ class Timeline:
     """Converts project seconds to quarter-note beats, treating each tempo envelope point as a step."""
 
     def __init__(self, bpm: float | None, points: list[tuple[float, float]]) -> None:
-        self.points = sorted(points)
+        self.points = sorted(points, key=lambda point: point[0])
         self.bpm = bpm
         self.starts: list[float] = []
         self.beats_at: list[float] = []
@@ -165,6 +169,7 @@ class _NoteStats:
     tempo_ignoring: int = 0
     unmatched: int = 0
     skipped_sources: int = 0
+    invalid_events: int = 0
 
 
 def _active_source(item: Block) -> Block | None:
@@ -209,21 +214,39 @@ def _read_item_notes(item: Block, timeline: Timeline, stats: _NoteStats) -> None
     ignore = source.prop("IGNTEMPO")
     stats.tempo_ignoring += ignore is not None and ignore.params[:1] == ["1"]
     tick = 0
-    pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    pending: dict[tuple[int, int], deque[tuple[int, int]]] = {}
     for entry in source.entries:
         if isinstance(entry, Prop) and entry.key in ("E", "e"):
             tick += _int(entry, 0, "MIDI event delta")
-            status, first, second = (_int(entry, index, "MIDI event byte", 16) for index in (1, 2, 3))
-            kind, channel = status & 0xF0, status & 0x0F
+            message = _channel_message(entry)
+            if message is None:
+                stats.invalid_events += 1
+                continue
+            kind, channel, first, second = message
             if kind == 0x90 and second > 0:
-                pending.setdefault((channel, first), []).append((tick, second))
+                pending.setdefault((channel, first), deque()).append((tick, second))
             elif kind in (0x80, 0x90) and pending.get((channel, first)):
-                begin, velocity = pending[(channel, first)].pop(0)
+                begin, velocity = pending[(channel, first)].popleft()
                 _add_note(stats, Note(first, velocity, start_beat + begin / ppq, start_beat + tick / ppq, channel),
                           end_beat)
         elif _is_sysex(entry):
             tick += int(entry.params[0]) if entry.params and entry.params[0].lstrip("-").isdigit() else 0
     stats.unmatched += sum(len(starts) for starts in pending.values())
+
+
+def _channel_message(entry: Prop) -> tuple[int, int, int, int] | None:
+    """Status kind, channel and the first two data bytes of a channel message; None when the event is not valid.
+
+    Program change (0xC0) and channel pressure (0xD0) carry one data byte, so their second value is 0."""
+    try:
+        status, *data = (int(value, 16) for value in entry.params[1:4])
+    except ValueError:
+        return None
+    kind = status & 0xF0
+    wanted = 1 if kind in ONE_DATA_BYTE else 2
+    if not 0x80 <= status <= 0xEF or len(data) < wanted or any(not 0 <= value <= 127 for value in data[:wanted]):
+        return None
+    return kind, status & 0x0F, data[0], data[1] if wanted == 2 else 0
 
 
 def _is_sysex(entry: Block | Prop) -> bool:
@@ -294,18 +317,29 @@ def _tempo(facts: ProjectFacts, evidence: Evidence, source_id: str, project: Blo
                         f"TEMPO (line {tempo.line})",
                         "Stored project meter; meter changes on the tempo envelope are not decoded.")
     points: list[tuple[float, float]] = []
+    ramps = 0
     envelope = next(iter(project.blocks("TEMPOENVEX")), None)
     if envelope is not None and _first_param(envelope, "ACT") == "0":
         evidence.diagnostics.append(Diagnostic("reaper_tempo_envelope_inactive", "warning",
             "The tempo envelope is stored as inactive (ACT 0) and was ignored.", source_id))
     elif envelope is not None:
-        points = [(_float(prop, 0, "tempo point position"), _float(prop, 1, "tempo point bpm"))
-                  for prop in envelope.props("PT")]
+        pt = envelope.props("PT")
+        points = [(_float(prop, 0, "tempo point position"), _float(prop, 1, "tempo point bpm")) for prop in pt]
+        ramps = sum(prop.params[2:3] != [SQUARE_SHAPE] for prop in pt)
     values = {value for _, value in points}
     locator = f"TEMPOENVEX (line {envelope.line})" if envelope is not None else ""
     timeline = Timeline(bpm, points)
     if len(values) > 1:
-        facts.tempo_map([{"beat": timeline.beats(second), "bpm": value} for second, value in timeline.points], locator)
+        if ramps:
+            evidence.diagnostics.append(Diagnostic("reaper_tempo_ramps", "warning",
+                f"{ramps} tempo envelope point(s) are not square steps (or have no stored shape); REAPER "
+                "interpolates tempo to the next point, which this reader does not model.", source_id))
+            map_facts: ProjectFacts = GradedFacts(evidence, source_id, METHOD, facts.detail, grade="low",
+                caveat="Some points are ramps or have no stored shape, so tempo between points and the beat "
+                       "positions that depend on it are approximated as steps.")
+        else:
+            map_facts = facts
+        map_facts.tempo_map([{"beat": timeline.beats(second), "bpm": value} for second, value in timeline.points], locator)
         if bpm is not None:
             evidence.add(source_id, "reaper.base_tempo", bpm, "BPM", "project", "static", f"TEMPO (line {tempo.line})",
                          METHOD, "extracted", "medium",
@@ -331,6 +365,10 @@ def _track_facts(facts: ProjectFacts, track: Block, index: int, timeline: Timeli
     if stats.unmatched:
         evidence.diagnostics.append(Diagnostic("unmatched_note_on", "warning",
             f"{stats.unmatched} MIDI note(s) in REAPER track {index} have no note-off.", source_id))
+    if stats.invalid_events:
+        evidence.diagnostics.append(Diagnostic("reaper_invalid_midi_event", "warning",
+            f"{stats.invalid_events} MIDI event(s) in REAPER track {index} have an invalid status or data bytes and "
+            f"were skipped.", source_id))
     facts.track_notes(index, stats.notes, f"TRACK (line {track.line}) ITEM SOURCE MIDI",
                       _notes_reason(stats, bool(timeline.points)), "medium")
     return [prop.params[0] for item in items for source in item.walk() if source.tag == "SOURCE"
