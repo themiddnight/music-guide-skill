@@ -48,10 +48,11 @@ class ProjectFacts:
         self._add("tempo", _finite_number(bpm, "tempo", positive=True), "BPM", locator, reason, confidence="medium")
 
     def meter(self, numerator: int, denominator: int, locator: str,
-              reason: str = "Stored project meter; meter changes are not reconstructed.") -> None:
+              reason: str = "Stored project meter; meter changes are not reconstructed.",
+              confidence: Confidence = "medium") -> None:
         if _count(numerator, "meter numerator") == 0 or _count(denominator, "meter denominator") == 0:
             raise ValueError("meter numerator and denominator must be positive")
-        self._add("meter", f"{numerator}/{denominator}", "signature", locator, reason, confidence="medium")
+        self._add("meter", f"{numerator}/{denominator}", "signature", locator, reason, confidence=confidence)
 
     def tempo_map(self, points: Sequence[Mapping[str, float]], locator: str) -> None:
         """Each point is {"beat": position in quarter notes, "bpm": tempo from that beat}."""
@@ -66,9 +67,9 @@ class ProjectFacts:
         self._add("project.sample_rate", int(rate) if rate.is_integer() else rate, "Hz", locator,
                   "Project sample-rate setting; the rendered file may differ.")
 
-    def key(self, text: str, locator: str) -> None:
-        self._add("project.key", text, "text", locator,
-                  "Stored key setting; it records intent, not the audible key.", confidence="medium")
+    def key(self, text: str, locator: str, reason: str = "Stored key setting; it records intent, not the audible key.",
+            confidence: Confidence = "medium") -> None:
+        self._add("project.key", text, "text", locator, reason, confidence=confidence)
 
     def track_count(self, count: int, locator: str) -> None:
         self._add("project.track_count", _count(count, "track count"), "count", locator, "Count of stored tracks.")
@@ -99,12 +100,15 @@ class ProjectFacts:
         self._add("project.clip_count", _count(count, "clip count"), "count", locator, "Count of stored clips.",
                   scope="project" if track is None else _track_scope(track))
 
-    def track_notes(self, index: int, notes: Sequence[Note], locator: str) -> None:
+    def track_notes(self, index: int, notes: Sequence[Note], locator: str,
+                    reason: str = "Aggregated from stored notes; beats are quarter notes, not audible timing.",
+                    confidence: Confidence = "high") -> None:
+        """`reason` and `confidence` let an adapter state which timing it approximated."""
         if not notes:
             return
         scope = _track_scope(index)
-        self._add("project.track_notes", summarize_notes(notes), "note_summary", locator,
-                  "Aggregated from stored notes; beats are quarter notes, not audible timing.", scope=scope)
+        self._add("project.track_notes", summarize_notes(notes), "note_summary", locator, reason,
+                  scope=scope, confidence=confidence)
         if self.detail != "full":
             return
         for note in notes:
