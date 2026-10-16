@@ -293,7 +293,7 @@ def meter(store: FeatureStore, beats: BeatGrid) -> MeterEstimate | Skip:
 
 
 def _sub_beat_peaks(flux: np.ndarray, rate: float, times: np.ndarray) -> list[float]:
-    """Beat fractions of the distinct peaks of the mean onset envelope inside SWING_SEARCH, tallest first."""
+    """Beat fractions, in order, of the distinct peaks of the mean onset envelope inside SWING_SEARCH."""
     fractions = np.arange(SUB_BEAT_BINS) / SUB_BEAT_BINS
     positions = (times[:-1, None] + fractions[None, :] * np.diff(times)[:, None]) * rate
     profile = np.interp(positions, np.arange(len(flux)), flux).mean(axis=0)
@@ -301,8 +301,7 @@ def _sub_beat_peaks(flux: np.ndarray, rate: float, times: np.ndarray) -> list[fl
     peaks = low + signal.find_peaks(profile[low:high])[0]
     if not len(peaks):
         return []
-    tallest = profile[peaks].max()
-    distinct = sorted(peaks[profile[peaks] >= DISTINCT_PEAK_SHARE * tallest], key=lambda peak: -profile[peak])
+    distinct = peaks[profile[peaks] >= DISTINCT_PEAK_SHARE * profile[peaks].max()]
     return [float(fractions[peak]) for peak in distinct]
 
 
@@ -310,7 +309,7 @@ def swing(store: FeatureStore, beats: BeatGrid) -> Swing | Skip:
     flux, rate = store.flux, store.onset_rate
     peaks = _sub_beat_peaks(flux, rate, beats.times)
     if len(peaks) > 1:
-        where = ", ".join(f"{peak:.2f}" for peak in sorted(peaks))
+        where = ", ".join(f"{peak:.2f}" for peak in peaks)
         return Skip(f"the onsets between beats peak at {where} of the beat with similar strength, so the subdivision"
                     " is ambiguous and a long-to-short ratio would depend on which peak is read.")
     positions = []
