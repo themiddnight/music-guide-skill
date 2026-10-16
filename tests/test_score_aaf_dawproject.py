@@ -594,8 +594,12 @@ class AafTest(ScoreCase):
         self.assertLess(time.monotonic() - started, 40)
 
     def test_time_limit_stops_the_parser(self):
-        with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*took longer than 0.05 seconds"):
-            self.run_adapter(self.make(), timeout_seconds=0.05)
+        # The limit is checked once per poll, and a child that ends before the first poll is never checked. A 0.1 s
+        # poll against a 0.05 s limit therefore failed on a quiet machine whose child finishes in under 0.1 s. A 10 ms
+        # poll against a 5 ms limit cannot be beaten: the child cannot start, import pyaaf2 and parse in 10 ms.
+        with mock.patch.object(aaf_adapter, "POLL_SECONDS", 0.01):
+            with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*took longer than 0.005 seconds"):
+                self.run_adapter(self.make(), timeout_seconds=0.005)
         self.assertEqual(self.run_adapter(self.make(), timeout_seconds=30).observations[0].property, "project.application")
 
     def test_child_ends_itself_at_its_own_deadline(self):
