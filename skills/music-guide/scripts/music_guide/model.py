@@ -87,10 +87,11 @@ class Evidence:
 
 def detect_conflicts(evidence: Evidence) -> None:
     """Compare static claims in the same property, scope, unit and time domain."""
+    shared_properties = {"tempo", "meter"}
     groups: dict[tuple[str, str, str, str], list[Observation]] = {}
     for item in evidence.observations:
-        # Event streams can change legitimately. Only static claims are comparable.
-        if item.timeDomain != "static":
+        # File inventories and event streams describe distinct sources, not shared claims.
+        if item.timeDomain != "static" or item.property not in shared_properties:
             continue
         key = (item.property, item.scope, item.unit, item.timeDomain)
         groups.setdefault(key, []).append(item)

@@ -1,0 +1,7 @@
+{
+  "name": "music-guide",
+  "version": "0.1.0",
+  "description": "Local evidence extraction and music guidance for analysis and creation.",
+  "skills": "./skills/",
+  "requires_local_executor": true
+}

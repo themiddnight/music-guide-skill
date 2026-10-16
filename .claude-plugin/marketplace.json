@@ -1,0 +1,14 @@
+{
+  "name": "music-guide-local",
+  "owner": {
+    "name": "Music Guide"
+  },
+  "plugins": [
+    {
+      "name": "music-guide",
+      "source": "./",
+      "description": "Local music evidence extraction and guidance."
+    }
+  ],
+  "description": "Local Music Guide plugin marketplace for this repository."
+}
