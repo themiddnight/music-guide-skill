@@ -7,6 +7,7 @@ spectrum is one window centred on that span.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 from scipy import signal
@@ -17,8 +18,11 @@ FEATURE_RATE = 11025
 # Per-channel FFTs cost time linearly in channels, so wider files are folded to this many groups.
 MAX_FEATURE_CHANNELS = 8
 ONSET_SIZE, ONSET_HOP = 1024, 128
-# Log-magnitude flux under a Hann window peaks while an attack is still about 320 samples (29 ms) after the window
-# centre, measured on clicks at 44.1 and 48 kHz. Frames are labelled at that point so onset times match attacks.
+# Log-magnitude flux under a Hann window peaks while an attack is still about 320 decimated samples after the window
+# centre, so frames are labelled at that point and onset times match attacks. Measured on full-scale clicks, where
+# beats then land within 4 ms of the truth from 8 to 192 kHz. In time it is 20 to 40 ms, because the decimated rate
+# runs from 8 kHz (8 kHz files) to 16 kHz (16 and 32 kHz files). Clicks 26 dB down peak later and read 3 to 10 ms
+# late.
 ONSET_LEAD = 320
 ONSET_BAND_EDGES = (150.0, 2000.0)
 ROW_RATE = 10
@@ -29,7 +33,7 @@ PCP_RANGE = (65.0, 2100.0)
 
 @dataclass(frozen=True, kw_only=True)
 class FeatureStore:
-    """Finished features. Arrays are float32 and read-only."""
+    """Finished features. Every array is read-only; onset and pcp are float32, the cached flux float64."""
 
     onset: np.ndarray  # (frames, 3) positive log-magnitude flux below 150 Hz, 150-2000 Hz and above 2000 Hz
     onset_rate: float
@@ -39,9 +43,12 @@ class FeatureStore:
     channels: int
     folded: bool
 
-    @property
+    @cached_property
     def flux(self) -> np.ndarray:
-        return self.onset.sum(axis=1, dtype=np.float64)
+        """The three bands summed in float64, computed once and read-only."""
+        total = self.onset.sum(axis=1, dtype=np.float64)
+        total.flags.writeable = False
+        return total
 
 
 class _Rows:
@@ -179,6 +186,6 @@ def bin_sum(values: np.ndarray, rate: float, edges: np.ndarray) -> np.ndarray:
 
 
 def projected_bytes(seconds: float, rate: int) -> int:
-    """Size of the finished store for a file of this length and sample rate."""
+    """Size of the finished store for a file of this length and sample rate, the cached float64 flux included."""
     onset_frames = seconds * rate / max(1, rate // FEATURE_RATE) / ONSET_HOP
-    return int(4 * (3 * onset_frames + 12 * seconds * ROW_RATE))
+    return int(4 * 3 * onset_frames + 8 * onset_frames + 4 * 12 * seconds * ROW_RATE)

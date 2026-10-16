@@ -70,8 +70,54 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(small.onset.shape[1], 3)
         self.assertFalse(small.pcp.flags.writeable)
 
-    def test_projected_bytes_at_six_hours(self):
-        self.assertLess(store.projected_bytes(6 * 3600, 22050), 400 * 2 ** 20)
+    def test_projected_bytes_match_the_store_and_stay_small_at_six_hours(self):
+        for rate in (8000, 22050, 32000, 48000):
+            with self.subTest(rate=rate):
+                recorded = record(np.random.default_rng(rate).standard_normal(60 * rate) * 0.1, rate, chunk=65536)
+                actual = recorded.onset.nbytes + recorded.pcp.nbytes + recorded.flux.nbytes
+                self.assertAlmostEqual(store.projected_bytes(60, rate) / actual, 1, delta=0.01)
+                # 61.4 MiB at 16 and 32 kHz, whose decimated rate gives the most onset frames.
+                self.assertLess(store.projected_bytes(6 * 3600, rate), 62 * 2 ** 20)
+
+    def test_a_wrong_header_frame_count_does_not_change_the_store(self):
+        samples = np.random.default_rng(5).standard_normal((7 * RATE, 2)) * 0.1
+        right = record(samples, RATE, chunk=5000)
+        for expected in (0, len(samples) // 3, len(samples) * 5):
+            with self.subTest(expected=expected):
+                recorder = store.FeatureRecorder(RATE, 2, expected)
+                for begin in range(0, len(samples), 5000):
+                    recorder.feed(samples[begin:begin + 5000])
+                finished = recorder.finish()
+                np.testing.assert_array_equal(finished.onset, right.onset)
+                np.testing.assert_array_equal(finished.pcp, right.pcp)
+                self.assertFalse(finished.onset.flags.writeable or finished.pcp.flags.writeable)
+
+    def test_common_sample_rates_give_a_beat_grid(self):
+        for rate in (8000, 11025, 22050, 44100):
+            with self.subTest(rate=rate):
+                samples, truth, _ = click_track(120, 4, 30, rate=rate)
+                recorded = record(samples, rate, chunk=65536)
+                grid = beats.beat_grid(recorded, beats.tempo(recorded))
+                self.assertIsInstance(grid, beats.BeatGrid)
+                self.assertAlmostEqual(grid.bpm, 120, delta=1)
+                self.assertLess(np.max(np.min(np.abs(truth[:, None] - grid.times[None, :]), axis=1)), 0.03)
+
+    def test_stems_report_tempo_beats_and_key_only(self):
+        path = self.dir / "drums.wav"
+        sf.write(path, np.stack([music(40)] * 2, axis=1), RATE, subtype="FLOAT")
+        result = run_cli("--stem", path, cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        estimated = {item["property"] for item in data["observations"] if item["provenance"] == "inferred"}
+        self.assertEqual(estimated, {"audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline",
+                                     "audio.beat_grid"})
+        self.assertEqual([item for item in data["diagnostics"] if item["code"].startswith("estimate")], [])
+
+    def test_flux_is_float64_and_read_only(self):
+        recorded = record(click_track(120, 4, 10)[0], RATE, chunk=65536)
+        self.assertEqual(recorded.flux.dtype, np.float64)
+        self.assertFalse(recorded.flux.flags.writeable)
+        np.testing.assert_array_equal(recorded.flux, recorded.onset.sum(axis=1, dtype=np.float64))
 
     def test_failed_analyzer_keeps_loudness_and_names_dependents(self):
         def broken(*_):

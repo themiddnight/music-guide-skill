@@ -27,7 +27,7 @@ from signals import record  # noqa: E402
 from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
 
 from music_guide.estimates import beats, harmony  # noqa: E402
-from music_guide.estimates.common import Skip  # noqa: E402
+from music_guide.estimates.common import ReportContext, Skip  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
@@ -339,9 +339,10 @@ class AudioMetricsTest(unittest.TestCase):
             with self.subTest(chunk=chunk):
                 streamed = record(samples, rate, chunk=chunk)
                 self.assertEqual(streamed.seconds, whole.seconds)
+                full = ReportContext("full", "")
                 for analyzer in (harmony.pitch_profile, harmony.key, beats.tempo):
-                    self.assertEqual(repr(analyzer(streamed)), repr(analyzer(whole)))
-                self.assertNotIsInstance(beats.tempo(streamed), Skip)
+                    self.assertNotIsInstance(analyzer(streamed), Skip)
+                    self.assertEqual(analyzer(streamed).report(full), analyzer(whole).report(full))
 
     def test_decodes_beyond_wav_and_flags_lossy_codecs(self):
         signal = stereo(tone(-20, 5))
