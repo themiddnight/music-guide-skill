@@ -95,6 +95,7 @@ def _run_child(path: Path, source_id: str, detail: Detail, timeout: float, memor
                          "deadline": timeout + CHILD_GRACE_SECONDS, "memory": memory}).encode()
     command = [sys.executable, "-I", "-c", CHILD_CODE]
     started = time.monotonic()
+    out = err = None
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
         try:
             try:
@@ -122,11 +123,14 @@ def _run_child(path: Path, source_id: str, detail: Detail, timeout: float, memor
                     resident = _resident_bytes(ps, child.pid)
                     if resident is not None and resident > memory:
                         raise _stopped(f"needed more than {memory // (1024 * 1024)} MiB of memory")
-            out.join(5)
-            err.join(5)
         finally:
             if child.poll() is None:
                 child.kill()
+                child.wait()
+            # Leaving the Popen block closes the pipes, so the drain threads must finish reading first.
+            for reader in (out, err):
+                if reader is not None:
+                    reader.join(5)
     code = child.returncode
     if code == MEMORY_EXIT:
         raise _stopped(f"needed more than {memory // (1024 * 1024)} MiB of memory")

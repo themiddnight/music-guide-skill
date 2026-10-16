@@ -467,11 +467,7 @@ def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True,
 
 
 class AafTest(ScoreCase):
-    # When the parent stops a child that is still writing (time or memory limit), `_run_child` closes the pipes while
-    # a drain thread is blocked in read(), and that thread dies with this ValueError. The parent's result is correct.
-    # Known race in adapters/aaf.py, outside the scope of the test-speed change: tolerate this one message at class
-    # scope and fail the class on any other exception raised in a thread.
-    KNOWN_READER_RACE = "PyMemoryView_FromBuffer"
+    # A drain thread that dies when the parent stops the child would only print a traceback, so collect them.
     thread_errors: list
 
     @classmethod
@@ -483,8 +479,8 @@ class AafTest(ScoreCase):
     @classmethod
     def tearDownClass(cls):
         threading.excepthook = cls.previous_hook
-        unexpected = [args.exc_value for args in cls.thread_errors if cls.KNOWN_READER_RACE not in str(args.exc_value)]
-        assert not unexpected, f"unexpected exceptions in threads: {unexpected!r}"
+        errors = [args.exc_value for args in cls.thread_errors]
+        assert not errors, f"exceptions in threads: {errors!r}"
 
     def make(self, name="mix.aaf", **options):
         path = self.dir / name
