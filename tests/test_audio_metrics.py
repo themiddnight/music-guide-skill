@@ -178,12 +178,12 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertNotIn("audio.side_to_mid_ratio", mono["facts"])
 
     def test_band_energy_and_centroid(self):
-        for hz, band in ((40, "sub"), (100, "low"), (1000, "low_mid"), (3000, "high_mid"), (10000, "high")):
+        for hz, band in ((40, "sub"), (100, "low"), (350, "low_mid"), (1000, "mid"), (3000, "high_mid"), (10000, "high")):
             with self.subTest(hz=hz):
                 data = self.analyze(stereo(tone(-12, 2, hz=hz)))
                 bands = self.value(data, "audio.band_energy")
                 self.assertEqual(data["facts"]["audio.band_energy"]["unit"], "dB_rel")
-                self.assertEqual(set(bands), {"sub", "low", "low_mid", "high_mid", "high"})
+                self.assertEqual(set(bands), {"sub", "low", "low_mid", "mid", "high_mid", "high"})
                 self.assertGreater(bands[band], -0.1)
                 self.assertTrue(all(value is None or value < -30 for name, value in bands.items() if name != band))
                 self.assertAlmostEqual(self.value(data, "audio.spectral_centroid"), hz, delta=hz * 0.02)

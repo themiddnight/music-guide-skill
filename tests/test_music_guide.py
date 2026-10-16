@@ -82,6 +82,19 @@ class MusicGuideTest(unittest.TestCase):
                               if item["property"] == "audio.samples_at_or_above_full_scale"), 1)
         self.assertTrue(any(item["code"] == "possible_clipping" for item in data["diagnostics"]))
 
+    def test_general_midi_drum_channel_is_flagged_as_percussion(self):
+        midi_path = self.dir / "drums.mid"
+        song = mido.MidiFile(type=1, ticks_per_beat=480)
+        for channel in (9, 0):
+            song.tracks.append(mido.MidiTrack([mido.Message("note_on", channel=channel, note=36, velocity=100),
+                                               mido.Message("note_off", channel=channel, note=36, time=240)]))
+        song.save(midi_path)
+        data = self.evidence("--midi", midi_path)
+        summaries = {item["scope"]: item for item in data["observations"] if item["property"] == "midi.track_summary"}
+        self.assertIs(summaries["midi_track:0"]["value"]["percussion"], True)
+        self.assertIn("drum sounds", summaries["midi_track:0"]["confidenceReason"])
+        self.assertIs(summaries["midi_track:1"]["value"]["percussion"], False)
+
     def test_midi_events_notes_and_unsupported_type(self):
         midi_path = self.dir / "notes.mid"
         song = mido.MidiFile(type=1, ticks_per_beat=480)
@@ -350,7 +363,7 @@ class MusicGuideTest(unittest.TestCase):
             "pitchClassCounts": {**zeros, "D": 1, "F#": 1, "A": 1},
             "pitchClassBeats": {**zeros, "D": 1, "F#": 2, "A": 1},
             "velocityMin": 60, "velocityMax": 100, "velocityMean": 80,
-            "startBeat": 0, "endBeat": 3, "maxPolyphony": 2, "channels": [0],
+            "startBeat": 0, "endBeat": 3, "maxPolyphony": 2, "channels": [0], "percussion": False,
         })
         drum = summaries["midi_track:2"]["value"]
         self.assertEqual((drum["channels"], drum["startBeat"], drum["endBeat"], drum["pitchMin"]["name"]),

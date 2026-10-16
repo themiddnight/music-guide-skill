@@ -201,7 +201,7 @@ def _balance_facts(measured: dict, confidence: Confidence, note: str) -> list[Fa
     facts = [
         Fact("audio.band_energy", bands, "dB_rel", spectral,
              (silent if bands is None else "Share of total energy per band in dB (sub <60 Hz, low 60-250 Hz,"
-              " low_mid 250-2000 Hz, high_mid 2-6 kHz, high >6 kHz) from a Hann-windowed 4096-point average power"
+              " low_mid 250-500 Hz, mid 500-2000 Hz, high_mid 2-6 kHz, high >6 kHz) from a Hann-windowed 4096-point average power"
               " spectrum summed over channels, DC bin excluded; null band means no energy.") + note, confidence),
         Fact("audio.spectral_centroid", centroid, "Hz", spectral,
              (silent if centroid is None else "Power-weighted mean frequency of the long-term average spectrum.") + note,

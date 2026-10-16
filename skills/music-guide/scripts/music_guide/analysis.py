@@ -7,7 +7,7 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import signal
 
-BANDS = (("sub", 0.0, 60.0), ("low", 60.0, 250.0), ("low_mid", 250.0, 2000.0),
+BANDS = (("sub", 0.0, 60.0), ("low", 60.0, 250.0), ("low_mid", 250.0, 500.0), ("mid", 500.0, 2000.0),
          ("high_mid", 2000.0, 6000.0), ("high", 6000.0, math.inf))
 PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 # Krumhansl and Kessler (1982) probe-tone ratings, tonic first.

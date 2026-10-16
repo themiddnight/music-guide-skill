@@ -5,6 +5,8 @@ from pathlib import Path
 import mido
 from ..model import Detail, Diagnostic, Evidence
 from ..notes import Note, summarize_notes
+
+GM_PERCUSSION_CHANNEL = 9
 from .common import MAX_MIDI_BYTES, _read_bounded
 from .listing import MAX_LISTED, MAX_NOTE_LISTING, capped, truncation
 
@@ -77,9 +79,15 @@ def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
                 f"{unmatched_ons} MIDI note(s) in track {track_index} have no note-off.", source_id))
         if notes:
             note_count += len(notes)
-            evidence.add(source_id, "midi.track_summary", summarize_notes(notes), "note_summary",
+            summary = summarize_notes(notes)
+            summary["percussion"] = summary["channels"] == [GM_PERCUSSION_CHANNEL]
+            reason = "Aggregated from paired stored notes; beats are quarter notes, not audible timing."
+            if summary["percussion"]:
+                reason += (" All notes use General MIDI channel 10, so note numbers name drum sounds and the pitch"
+                           " fields do not describe pitch.")
+            evidence.add(source_id, "midi.track_summary", summary, "note_summary",
                          f"midi_track:{track_index}", "static", f"track={track_index}", "mido+summarize_notes",
-                         "extracted", "high", "Aggregated from paired stored notes; beats are quarter notes, not audible timing.")
+                         "extracted", "high", reason)
     if names > MAX_LISTED:
         evidence.diagnostics.append(truncation("track names", MAX_LISTED, names, source_id))
     if note_count > listed and detail == "full":
