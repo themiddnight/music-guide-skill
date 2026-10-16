@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..model import Detail, Diagnostic, Evidence
+from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import Note, summarize_notes
 from ..project import ProjectFacts, TrackKind
 from .common import MAX_ZIP_BYTES, _read_bounded
@@ -21,12 +21,14 @@ from .graded import GradedFacts
 METHOD = "flp-events"
 MAX_FLP_BYTES = MAX_ZIP_BYTES
 MAX_EVENTS = 4_000_000
+MAX_NOTES = 1_000_000
 MAX_TEXT = 1000
 HEADER = struct.Struct("<4sIhHH")
 EVENTS_OFFSET = HEADER.size + 8
 NOTE = struct.Struct("<IHHIHHBBBBBBBB")
 PLAYLIST_ITEM = struct.Struct("<IHHIHH2sH4sff")
-PLAYLIST_SIZES = (32, 60)
+PLAYLIST_ITEM_SIZE_BEFORE_21, PLAYLIST_ITEM_SIZE_FROM_21 = 32, 60
+WRAPPER = "Fruity Wrapper"
 MAX_KEY = 131
 MIN_TEMPO, MAX_TEMPO = 10.0, 1000.0
 
@@ -43,12 +45,17 @@ PROJECT_STRINGS = {ID_TITLE: "flstudio.title", ID_COMMENTS: "flstudio.comments",
                    ID_ARTISTS: "flstudio.artists"}
 
 CHANNEL_SAMPLER, CHANNEL_NATIVE, CHANNEL_LAYER, CHANNEL_INSTRUMENT, CHANNEL_AUTOMATION = 0, 2, 3, 4, 5
-CHANNEL_KINDS: dict[int, TrackKind] = {CHANNEL_SAMPLER: "audio", CHANNEL_LAYER: "group",
-                                       CHANNEL_INSTRUMENT: "instrument"}
+CHANNEL_KINDS: dict[int, TrackKind] = {CHANNEL_LAYER: "group", CHANNEL_INSTRUMENT: "instrument"}
 METER_DENOMINATORS = frozenset({2, 4, 8, 16})
 HEADER_CAVEAT = "Layout taken from public reverse engineering of the undocumented format."
 METER_CAVEAT = ("Event IDs 17 and 18 are interpreted as the global time signature after PyFLP; node-flp names "
                 "them pattern and block length, and FL's time-division mode is not distinguished.")
+LAYOUT_CAVEAT = "Read from the undocumented FLP event layout, which was checked against public reverse engineering only."
+KIND_CAVEAT = (LAYOUT_CAVEAT + " The channel kind comes from the stored channel type; the built-in Sampler (type 0) "
+               "plays pattern notes and has no audio or instrument flag, and a channel with a sample and no plugin "
+               "is either an audio clip or a sampler channel.")
+WRAPPER_CAVEAT = ("'Fruity Wrapper' is the internal name FL gives every hosted VST or AU plugin, so the real plugin "
+                  "is named only by the plugin display name (event 203), which the user can rename.")
 NOTES_CAVEAT = "Note layout follows PyFLP and was not checked against a real project."
 
 
@@ -64,6 +71,7 @@ class _Channel:
     type: int | None = None
     name: str | None = None
     internal_name: str | None = None
+    plugin_name: str | None = None
     sample_path: str | None = None
 
 
@@ -155,10 +163,19 @@ def _text(raw: bytes, utf16: bool) -> str:
 
 
 def _channel_kind(channel: _Channel) -> TrackKind:
+    if channel.type in (CHANNEL_NATIVE, CHANNEL_INSTRUMENT) and channel.sample_path and not channel.internal_name:
+        # PyFLP treats a native or instrument channel with a sample and no plugin as a sample channel.
+        return "audio"
     if channel.type == CHANNEL_NATIVE:
-        # Audio clips are stored as native channels with a sample and no plugin.
-        return "audio" if channel.sample_path and not channel.internal_name else "instrument"
+        return "instrument"
     return CHANNEL_KINDS.get(channel.type, "unknown") if channel.type is not None else "unknown"
+
+
+def _plugin_label(internal_name: str | None, display_name: str | None) -> tuple[str, bool] | None:
+    """The plugin name to report and whether it is the unverified display name of a Fruity Wrapper host."""
+    if internal_name != WRAPPER:
+        return (internal_name or display_name, False) if internal_name or display_name else None
+    return display_name or WRAPPER, True
 
 
 def flstudio(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
@@ -191,6 +208,7 @@ def flstudio(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
     context = None
     channel = pattern = arrangement = slot = None
     skipped: list[str] = []
+    note_total = 0
 
     def current_arrangement() -> _Arrangement:
         nonlocal arrangement
@@ -232,7 +250,10 @@ def flstudio(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
                         channel.internal_name = value or None
                     elif event_id == ID_SAMPLE_PATH:
                         channel.sample_path = value or None
-                    elif event_id == ID_PLUGIN_NAME or channel.name is None:
+                    elif event_id == ID_PLUGIN_NAME:
+                        channel.plugin_name = value or channel.plugin_name
+                        channel.name = value or channel.name
+                    elif channel.name is None:
                         channel.name = value or None
                 elif context == "mixer" and event_id in (ID_PLUGIN_NAME, ID_PLUGIN_INTERNAL_NAME):
                     if slot is None:
@@ -247,6 +268,9 @@ def flstudio(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
             elif event_id == ID_ARRANGEMENT_NAME and context == "arrangement" and arrangement is not None:
                 arrangement.name = _text(raw, utf16) or None
             elif event_id == ID_NOTES and context == "pattern" and pattern is not None:
+                note_total += len(raw) // NOTE.size
+                if note_total > MAX_NOTES:
+                    raise ValueError(f"FLP file has more than {MAX_NOTES} notes")
                 _read_notes(pattern, raw, ppq, offset, skipped)
             elif event_id == ID_PLAYLIST and context == "arrangement":
                 _read_playlist(current_arrangement(), raw, _major(version), offset, skipped)
@@ -274,11 +298,10 @@ def _read_notes(pattern: _Pattern, raw: bytes, ppq: int, offset: int, skipped: l
 
 
 def _read_playlist(arrangement: _Arrangement, raw: bytes, major: int, offset: int, skipped: list[str]) -> None:
-    preferred = PLAYLIST_SIZES[1] if major >= 21 else PLAYLIST_SIZES[0]
-    size = next((item for item in (preferred, *PLAYLIST_SIZES) if len(raw) % item == 0), None)
-    if size is None:
-        skipped.append(f"FLP playlist event at byte {offset} holds {len(raw)} bytes, which is not a whole "
-                       f"number of {PLAYLIST_SIZES[0]} or {PLAYLIST_SIZES[1]} byte items; skipped.")
+    size = PLAYLIST_ITEM_SIZE_FROM_21 if major >= 21 else PLAYLIST_ITEM_SIZE_BEFORE_21
+    if len(raw) % size:
+        skipped.append(f"FLP playlist event at byte {offset} holds {len(raw)} bytes, which is not a whole number of "
+                       f"{size} byte items, the item size for FL Studio {major}; the playlist was skipped.")
         return
     for index in range(len(raw) // size):
         position, base, item_index, length, *_ = PLAYLIST_ITEM.unpack_from(raw, index * size)
@@ -291,11 +314,21 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
           insert_names: list[str]) -> None:
     facts = ProjectFacts(evidence, source_id, METHOD, detail)
     low = GradedFacts(evidence, source_id, METHOD, detail, grade="low", caveat=METER_CAVEAT)
+    layout = GradedFacts(evidence, source_id, METHOD, detail, grade="medium", caveat=LAYOUT_CAVEAT)
+    kinds = GradedFacts(evidence, source_id, METHOD, detail, grade="medium", caveat=KIND_CAVEAT)
+    wrapped = GradedFacts(evidence, source_id, METHOD, detail, grade="low", caveat=WRAPPER_CAVEAT)
 
     def add(property: str, value, unit: str, scope: str, locator: str, reason: str, *,
-            time_domain: str = "static") -> None:
-        evidence.add(source_id, property, value, unit, scope, time_domain, locator, METHOD, "extracted", "high",
+            time_domain: str = "static", confidence: Confidence = "high") -> None:
+        evidence.add(source_id, property, value, unit, scope, time_domain, locator, METHOD, "extracted", confidence,
                      reason)
+
+    def plugin(internal_name: str | None, display_name: str | None, track: int | None, locator: str) -> None:
+        label = _plugin_label(internal_name, display_name)
+        if label is None:
+            return
+        name, hosted = label
+        (wrapped if hosted else layout).plugin(name, track, locator)
 
     facts.application(f"FL Studio {version}", "event 199 (FL version text)")
     add("flstudio.header", {"format": file_format, "channelCount": channel_count, "ppq": ppq}, "header",
@@ -317,34 +350,33 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
     if ID_TIME_SIG_NUMERATOR in numbers and ID_TIME_SIG_BEAT in numbers:
         numerator, beat = numbers[ID_TIME_SIG_NUMERATOR], numbers[ID_TIME_SIG_BEAT]
         add("flstudio.time_signature", {"numerator": numerator, "beat": beat}, "signature", "project",
-            "events 17 and 18", METER_CAVEAT)
+            "events 17 and 18", METER_CAVEAT, confidence="low")
         if numerator >= 1 and beat in METER_DENOMINATORS:
             low.meter(numerator, beat, "events 17 and 18")
     for event_id, property in PROJECT_STRINGS.items():
         if strings.get(event_id):
             add(property, strings[event_id], "text", "project", f"event {event_id}", "Stored project information text.")
-    facts.track_count(len(channels), "channel rack (event 64)")
+    layout.track_count(len(channels), "channel rack (event 64)")
     media: list[str] = []
     for index, channel in enumerate(channels):
         locator = f"channel iid={channel.iid}"
-        facts.track(index, channel.name, _channel_kind(channel), locator)
+        kinds.track(index, channel.name, _channel_kind(channel), locator)
         add("flstudio.channel", {"iid": channel.iid, "type": channel.type, "plugin": channel.internal_name},
-            "channel", f"project_track:{index}", locator, "Stored channel type ID and plugin internal name.")
-        if channel.internal_name:
-            facts.plugin(channel.internal_name, index, locator)
+            "channel", f"project_track:{index}", locator,
+            f"Stored channel type ID and plugin internal name. {LAYOUT_CAVEAT}", confidence="medium")
+        plugin(channel.internal_name, channel.plugin_name, index, locator)
         if channel.sample_path:
             media.append(channel.sample_path)
     if len(channels) != channel_count:
         evidence.diagnostics.append(Diagnostic("flp_channel_count_mismatch", "info",
             f"The FLP header counts {channel_count} channels but {len(channels)} channel records were read.", source_id))
     for slot in slots:
-        if slot.internal_name or slot.name:
-            facts.plugin(slot.internal_name or slot.name or "", None, "mixer effect slot")
+        plugin(slot.internal_name, slot.name, None, "mixer effect slot")
     for name in insert_names:
         if name:
             add("flstudio.mixer_insert_name", name, "text", "project", "event 204",
                 "Name of a renamed mixer insert; insert positions are not decoded.")
-    facts.media_references(media, "channel sample paths (event 196)")
+    layout.media_references(media, "channel sample paths (event 196)")
     zero_length = 0
     for pattern in sorted(patterns.values(), key=lambda item: item.iid):
         scope = f"flstudio_pattern:{pattern.iid}"
@@ -379,6 +411,7 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
                                      "patternItemCount": uses,
                                      "channelItemCount": len(arrangement.items) - uses, "spanBeats": span},
             "arrangement", f"flstudio_arrangement:{index}", f"arrangement {index} playlist (event 233)",
-            f"Stored playlist item counts and end of the last item in quarter notes. {NOTES_CAVEAT}")
+            f"Stored playlist item counts and end of the last item in quarter notes. {NOTES_CAVEAT}",
+            confidence="medium")
     if sum(bool(item.items) for item in arrangements) == 1:
-        facts.clip_count(playlist_items, "playlist (event 233)")
+        layout.clip_count(playlist_items, "playlist (event 233)")

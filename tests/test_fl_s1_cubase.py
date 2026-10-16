@@ -159,7 +159,7 @@ class FlStudioTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.track_count"), [2])
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
             "project_track:0": {"name": "Lead", "kind": "instrument", "index": 0},
-            "project_track:1": {"name": "Kick", "kind": "audio", "index": 1}})
+            "project_track:1": {"name": "Kick", "kind": "unknown", "index": 1}})
         self.assertEqual([(item["value"], item["scope"]) for item in self.items(data, "project.plugin")],
                          [({"name": "3x Osc", "track": 0}, "project_track:0"),
                           ({"name": "Fruity Reeverb 2", "track": None}, "project")])
@@ -243,6 +243,66 @@ class FlStudioTest(ProjectCliTest):
         self.assertTrue(flstudio.detect(path))
         path.write_bytes(path.read_bytes()[:14] + b"XXXX" + path.read_bytes()[18:])
         self.assertFalse(flstudio.detect(path))
+
+
+    def test_wrapped_vst_is_named_by_its_display_name_at_low_confidence(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 4), text(201, "Fruity Wrapper"),
+                  text(203, "Serum"), word(64, 1), byte(21, 4), text(201, "Fruity Wrapper"),
+                  word(98, 0), text(201, "Fruity Wrapper"), text(203, "Valhalla Room"),
+                  word(98, 1), text(201, "Fruity Wrapper"), word(98, 2), text(201, "Fruity Limiter"), text(203, "Master Limiter")]
+        data = self.project(self.write(events=events, channels=2))
+        plugins = {(item["value"]["name"], item["scope"]): item for item in self.items(data, "project.plugin")}
+        self.assertEqual(sorted(plugins), [("Fruity Limiter", "project"), ("Fruity Wrapper", "project"),
+                                           ("Fruity Wrapper", "project_track:1"), ("Serum", "project_track:0"),
+                                           ("Valhalla Room", "project")])
+        for key in (("Serum", "project_track:0"), ("Valhalla Room", "project"), ("Fruity Wrapper", "project_track:1"),
+                    ("Fruity Wrapper", "project")):
+            self.assertEqual(plugins[key]["confidence"], "low", key)
+            self.assertIn("Fruity Wrapper", plugins[key]["confidenceReason"], key)
+        self.assertEqual(plugins[("Fruity Limiter", "project")]["confidence"], "medium")
+        self.assertEqual(self.values(data, "flstudio.channel")[0]["plugin"], "Fruity Wrapper")
+
+    def test_channel_kinds_follow_the_stored_type_and_sample(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 0), word(64, 1), byte(21, 4), text(196, "C:\\a\\hit.wav"),
+                  word(64, 2), byte(21, 2), text(196, "C:\\a\\clip.wav"), word(64, 3), byte(21, 4), text(201, "Fruity Wrapper"),
+                  text(196, "C:\\a\\x.wav"), word(64, 4), byte(21, 99)]
+        data = self.project(self.write(events=events, channels=5))
+        kinds = [item["value"]["kind"] for item in sorted(self.items(data, "project.track"), key=lambda item: item["value"]["index"])]
+        self.assertEqual(kinds, ["unknown", "audio", "audio", "instrument", "unknown"])
+
+    def test_layout_dependent_facts_are_not_high_confidence(self):
+        data = self.project(self.write())
+        for property in ("flstudio.time_signature", "flstudio.arrangement", "flstudio.channel", "project.track",
+                         "project.plugin", "project.track_count", "project.clip_count", "project.media_reference"):
+            items = self.items(data, property)
+            self.assertTrue(items, property)
+            for item in items:
+                self.assertNotEqual(item["confidence"], "high", property)
+        self.assertEqual(self.items(data, "project.application")[0]["confidence"], "high")
+
+    def test_playlist_item_size_follows_the_version_and_never_guesses(self):
+        def arrangement(version, count, size):
+            items = b"".join(playlist_item(index * 96, 96, 20481, size=size) for index in range(count))
+            return [event(199, version.encode() + b"\0"), word(99, 1), text(241, "Main"), event(233, items)]
+        old = self.project(self.write("old15.flp", events=arrangement("20.8.3.2304", 15, 32)))
+        self.assertEqual(self.values(old, "flstudio.arrangement")[0]["itemCount"], 15)
+        self.assertEqual(self.values(old, "project.clip_count"), [15])
+        new = self.project(self.write("new8.flp", events=arrangement("21.0.3.3517", 8, 60)))
+        self.assertEqual(self.values(new, "flstudio.arrangement")[0]["itemCount"], 8)
+        wrong = self.project(self.write("wrong.flp", events=arrangement("20.8.3.2304", 3, 60)))
+        self.assertEqual(wrong["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(wrong, "flstudio.arrangement"), [])
+        self.assertTrue(any(item["code"] == "flp_event_skipped" and "32 byte" in item["message"] for item in wrong["diagnostics"]))
+
+    def test_rejects_a_project_with_too_many_notes(self):
+        count = flstudio.MAX_NOTES + 1
+        events = [event(199, b"20.8.3.2304\0"), word(65, 1), event(224, note(0, 96, 60) * count)]
+        self.assert_rejected(self.write("many.flp", events=events), "notes")
+
+    def test_empty_plugin_name_event_keeps_the_earlier_channel_name(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 2), text(203, "Lead"), text(203, ""), text(201, "3x Osc")]
+        data = self.project(self.write(events=events, channels=1))
+        self.assertEqual(self.values(data, "project.track")[0]["name"], "Lead")
 
 
 SONG_XML = """<?xml version="1.0" encoding="UTF-8"?>
