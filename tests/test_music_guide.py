@@ -64,7 +64,8 @@ class MusicGuideTest(unittest.TestCase):
         sf.write(stem, np.zeros(4), 48000, subtype="PCM_16")
         data = self.evidence("--stem", stem)
         stem_facts = [item for item in data["observations"] if item["scope"].startswith("stem:")]
-        self.assertEqual(len(stem_facts), 6)
+        mix_properties = [item["property"] for item in data["observations"] if item["scope"] == "mixdown"]
+        self.assertEqual([item["property"] for item in stem_facts], mix_properties)
         self.assertIsNone(next(item["value"] for item in stem_facts if item["property"] == "audio.rms"))
         self.assertTrue(any(item["code"] == "digital_silence" for item in data["diagnostics"]))
         self.assertFalse(data["conflicts"])
@@ -212,6 +213,7 @@ class MusicGuideTest(unittest.TestCase):
         offset = 30 + int.from_bytes(raw[26:28], "little") + int.from_bytes(raw[28:30], "little")
         raw[offset] = 0xff
         corrupt.write_bytes(raw)
+        mix_only = len(self.evidence()["observations"])
         for flag, path in [("--dawproject", project), ("--dawproject", corrupt),
                            ("--solna", self.dir / "large-number.solna"),
                            ("--solna", self.dir / "deep.solna"),
@@ -223,7 +225,7 @@ class MusicGuideTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 data = self.evidence(flag, path)
                 self.assertEqual(data["sources"][1]["status"], "error")
-                self.assertEqual(len(data["observations"]), 6)
+                self.assertEqual(len(data["observations"]), mix_only)
 
     def test_dawproject_missing_structure_and_tempo_units(self):
         project = self.dir / "partial.dawproject"
