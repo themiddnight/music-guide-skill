@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import soundfile as sf
 
-from ..analysis import KEY_SWITCH_PENALTY, MAX_FEATURE_CHANNELS, MusicFeatures, SpectrumMeter, StereoMeter
+from ..analysis import SpectrumMeter, StereoMeter
+from ..estimates import BACKENDS, analyze, render
+from ..estimates.common import ReportContext
+from ..estimates.store import MAX_FEATURE_CHANNELS, FeatureRecorder, FeatureStore
 from ..loudness import MIN_LOUDNESS_RATE, LoudnessMeter, TruePeakMeter
-from ..model import Confidence, Diagnostic, Evidence, Provenance
+from ..model import Confidence, Detail, Diagnostic, Evidence, Fact
 from .common import MAX_AUDIO_BYTES
 
 LOSSY_SUBTYPES = {"MPEG_LAYER_I", "MPEG_LAYER_II", "MPEG_LAYER_III", "VORBIS", "OPUS"}
@@ -21,18 +22,6 @@ MIN_BLOCK_FRAMES = 1024
 MAX_AUDIO_SECONDS = 6 * 3600
 # +120 dBFS. Real recordings never get near it, and every squared sum stays finite below it.
 MAX_SAMPLE_MAGNITUDE = 1e6
-
-
-@dataclass
-class Fact:
-    property: str
-    value: Any
-    unit: str
-    method: str
-    reason: str
-    confidence: Confidence = "high"
-    provenance: Provenance = "measured"
-    time_domain: str = "static"
 
 
 def block_frames(channels: int) -> int:
@@ -47,7 +36,8 @@ def _decibels(value: float) -> float | None:
     return None if value == 0 else 20 * math.log10(value)
 
 
-def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown") -> None:
+def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown", detail: Detail = "summary",
+          backend: str = "builtin") -> None:
     if path.stat().st_size > MAX_AUDIO_BYTES:
         raise ValueError("audio file exceeds 4 GiB limit")
     try:
@@ -64,7 +54,7 @@ def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown"
         except (sf.LibsndfileError, RuntimeError) as error:
             raise ValueError(f"audio decoding failed: {error}") from error
         header = (file.format, file.subtype, file.channels, file.samplerate)
-    _report(header, measured, source_id, evidence, scope)
+    _report(header, measured, source_id, evidence, scope, detail, backend)
 
 
 def _measure(file: sf.SoundFile) -> dict:
@@ -73,7 +63,7 @@ def _measure(file: sf.SoundFile) -> dict:
     true_peak = TruePeakMeter(rate, channels)
     spectrum = SpectrumMeter(rate)
     stereo = StereoMeter() if channels == 2 else None
-    features = MusicFeatures(rate)
+    features = FeatureRecorder(rate, channels, file.frames)
     peak = sum_squares = 0.0
     frames = threshold_count = 0
     for block in file.blocks(blocksize=block_frames(channels), dtype="float64", always_2d=True):
@@ -99,7 +89,6 @@ def _measure(file: sf.SoundFile) -> dict:
     rms = math.sqrt(sum_squares / (frames * channels))
     if peak > 0 and rms == 0:
         raise ValueError("audio energy is below finite measurement range")
-    features.finish()
     bands, centroid = spectrum.result()
     return {
         "frames": frames, "peak": peak, "rms": rms, "threshold_count": threshold_count,
@@ -107,11 +96,12 @@ def _measure(file: sf.SoundFile) -> dict:
         "loudness": loudness.result() if loudness else None,
         "bands": bands, "centroid": centroid,
         "stereo": stereo.result() if stereo else None,
-        "features": features,
+        "features": features.finish(),
     }
 
 
-def _report(header: tuple, measured: dict, source_id: str, evidence: Evidence, scope: str) -> None:
+def _report(header: tuple, measured: dict, source_id: str, evidence: Evidence, scope: str, detail: Detail,
+            backend: str) -> None:
     file_format, subtype, channels, rate = header
     lossy = subtype in LOSSY_SUBTYPES or file_format == "MP3"
     signal_confidence: Confidence = "medium" if lossy else "high"
@@ -121,11 +111,20 @@ def _report(header: tuple, measured: dict, source_id: str, evidence: Evidence, s
     facts = _header_facts(header, measured, decoded, signal_confidence, lossy_note)
     facts += _loudness_facts(measured, channels, rate, signal_confidence, lossy_note)
     facts += _balance_facts(measured, signal_confidence, lossy_note)
-    facts += _estimate_facts(measured["features"], lossy_note)
+    store: FeatureStore = measured["features"]
+    fold_note = (f" {store.channels} channels were folded into {MAX_FEATURE_CHANNELS} groups (channel i into group"
+                 f" i mod {MAX_FEATURE_CHANNELS}) to bound cost; inverted channels sharing a group can cancel."
+                 if store.folded else "")
+    role = "mixdown" if scope == "mixdown" else "stem"
+    estimates, estimate_diagnostics = render(analyze(store, BACKENDS[backend], role),
+                                             ReportContext(detail, fold_note + lossy_note))
+    facts += estimates
     for fact in facts:
         evidence.add(source_id, fact.property, fact.value, fact.unit, scope, fact.time_domain,
                      "whole file", fact.method, fact.provenance, fact.confidence, fact.reason)
-    _diagnose(measured, lossy, channels, rate, {fact.property for fact in facts}, source_id, evidence)
+    _diagnose(measured, lossy, channels, rate, source_id, evidence)
+    evidence.diagnostics.extend(Diagnostic(item.code, item.severity, item.message, source_id)
+                                for item in estimate_diagnostics)
 
 
 def _header_facts(header: tuple, measured: dict, decoded: str, confidence: Confidence, note: str) -> list[Fact]:
@@ -221,48 +220,7 @@ def _balance_facts(measured: dict, confidence: Confidence, note: str) -> list[Fa
     return facts
 
 
-def _estimate_facts(features: MusicFeatures, note: str) -> list[Fact]:
-    facts = []
-    if features.fold is not None:
-        note = (f" {features.channels} channels were folded into {MAX_FEATURE_CHANNELS} groups (channel i into group"
-                f" i mod {MAX_FEATURE_CHANNELS}) to bound cost; inverted channels sharing a group can cancel.") + note
-    profile = features.pitch_class_profile()
-    if profile is not None:
-        facts.append(Fact("audio.pitch_class_profile", profile, "ratio", "chroma-fft",
-                          "Share of 65-2100 Hz spectral magnitude per pitch class (A4=440 Hz, about 11 kHz per channel)."
-                          " FFT magnitudes are averaged across channels to avoid polarity cancellation."
-                          " Overtones fold into other classes, so this is spectral energy, not played notes." + note,
-                          "medium"))
-    tempo = features.tempo()
-    if tempo is not None:
-        facts.append(Fact("audio.tempo_estimate", tempo, "BPM", "onset-autocorrelation",
-                          "Estimate, not a fact: top autocorrelation peaks of a spectral-flux onset envelope within"
-                          " 60-200 BPM, using FFT magnitudes averaged across channels before computing flux."
-                          " Half- and double-time readings are equally consistent with periodicity alone;"
-                          " rubato, swing and tempo changes are averaged away." + note, "low", "inferred"))
-    key = features.key()
-    if key is not None:
-        facts.append(Fact("audio.key_estimate", key, "key", "krumhansl-kessler-chroma",
-                          "Estimate, not a fact: mean correlation of each 5 s chroma cell with Krumhansl-Kessler"
-                          " major and minor profiles, so a long passage outweighs a loud one. Modal, non-diatonic or pentatonic music (for example Hirajoshi), key changes"
-                          " and detuning can be mislabelled; read audio.pitch_class_profile directly, and"
-                          " audio.key_timeline for key changes." + note,
-                          "low", "inferred"))
-    timeline = features.key_timeline()
-    if timeline is not None:
-        facts.append(Fact("audio.key_timeline", timeline, "key", "krumhansl-kessler-chroma-windows",
-                          "Estimate, not a fact: a Viterbi path over 5 s chroma cells scored against Krumhansl-Kessler"
-                          f" profiles, where changing key costs {KEY_SWITCH_PENALTY:g} in summed correlation. A new"
-                          " segment needs sustained evidence: a distant key shows within about 20 s, a closely related"
-                          " key (for example the dominant) can need over a minute, and borrowed chords or short"
-                          " tonicizations stay in the surrounding key. Boundaries are accurate to about one cell. The"
-                          " penalty was calibrated on three listener-labelled songs only. The same modal and"
-                          " pentatonic caveats as audio.key_estimate apply." + note, "low", "inferred"))
-    return facts
-
-
-def _diagnose(measured: dict, lossy: bool, channels: int, rate: int, emitted: set[str],
-              source_id: str, evidence: Evidence) -> None:
+def _diagnose(measured: dict, lossy: bool, channels: int, rate: int, source_id: str, evidence: Evidence) -> None:
     def add(code: str, severity: str, message: str) -> None:
         evidence.diagnostics.append(Diagnostic(code, severity, message, source_id))
 
@@ -283,8 +241,3 @@ def _diagnose(measured: dict, lossy: bool, channels: int, rate: int, emitted: se
     if channels > 2:
         add("channel_weighting", "info", f"{channels} channels: loudness weights every channel 1.0 because no channel"
             " map is read, and stereo metrics are skipped.")
-    features: MusicFeatures = measured["features"]
-    for name in ("tempo", "key"):
-        if f"audio.{name}_estimate" not in emitted:
-            add("estimate_skipped", "info", f"No {name} estimate: {features.seconds:.1f} s of audio without enough"
-                " usable signal for a periodicity or pitch-class reading.")

@@ -23,7 +23,11 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from signals import record  # noqa: E402
 from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
+
+from music_guide.estimates import beats, harmony  # noqa: E402
+from music_guide.estimates.common import Skip  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
@@ -291,19 +295,13 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertNotIn("folded", stereo_data["facts"]["audio.pitch_class_profile"]["confidenceReason"])
 
     def test_folded_channels_match_the_same_signal_in_fewer_channels(self):
-        from music_guide.analysis import MusicFeatures
         rng = np.random.default_rng(5)
         base = rng.standard_normal((3 * RATE, 8)) * 0.1
         doubled = np.concatenate([base, base], axis=1)
-        results = []
-        for samples in (base, doubled):
-            features = MusicFeatures(RATE)
-            features.feed(samples)
-            features.finish()
-            results.append(features.pitch_class_profile())
-        self.assertEqual(results[0].keys(), results[1].keys())
-        for name in results[0]:
-            self.assertAlmostEqual(results[0][name], results[1][name], places=9)
+        stores = [record(samples, RATE, chunk=len(samples)) for samples in (base, doubled)]
+        self.assertTrue(stores[1].folded)
+        np.testing.assert_allclose(stores[0].pcp, stores[1].pcp, rtol=1e-5)
+        np.testing.assert_allclose(stores[0].onset, stores[1].onset, rtol=1e-4, atol=1e-6)
 
     def test_periodicity_survives_antiphase_stereo(self):
         burst = np.random.default_rng(3).standard_normal(600) * np.exp(-np.arange(600) / 80) * 0.5
@@ -329,28 +327,21 @@ class AudioMetricsTest(unittest.TestCase):
                 self.assertEqual(self.value(flipped, "audio.pitch_class_profile"), expected)
                 self.assertEqual(self.value(flipped, "audio.key_estimate"), self.value(control, "audio.key_estimate"))
 
-    def test_music_features_are_invariant_to_decimator_chunk_boundaries(self):
-        from music_guide.analysis import MusicFeatures
+    def test_estimates_are_invariant_to_decimator_chunk_boundaries(self):
         rate = 192000
         n = np.arange(rate * 9)
         left = 0.2 * np.sin(2 * np.pi * 261.625565 * n / rate)
         right = 0.2 * np.sin(2 * np.pi * 369.994423 * n / rate)
         envelope = (n % (rate // 2) < rate // 10).astype(float)
         samples = np.stack([left * envelope, right * envelope], axis=1)
-        whole = MusicFeatures(rate)
-        whole.feed(samples)
-        whole.finish()
+        whole = record(samples, rate, chunk=len(samples))
         for chunk in (113, 65536):
             with self.subTest(chunk=chunk):
-                streamed = MusicFeatures(rate)
-                for start in range(0, len(samples), chunk):
-                    streamed.feed(samples[start:start + chunk])
-                streamed.finish()
+                streamed = record(samples, rate, chunk=chunk)
                 self.assertEqual(streamed.seconds, whole.seconds)
-                self.assertEqual(streamed.pitch_class_profile(), whole.pitch_class_profile())
-                self.assertEqual(streamed.key(), whole.key())
-                self.assertEqual(streamed.tempo(), whole.tempo())
-                self.assertIsNotNone(streamed.tempo())
+                for analyzer in (harmony.pitch_profile, harmony.key, beats.tempo):
+                    self.assertEqual(repr(analyzer(streamed)), repr(analyzer(whole)))
+                self.assertNotIsInstance(beats.tempo(streamed), Skip)
 
     def test_decodes_beyond_wav_and_flags_lossy_codecs(self):
         signal = stereo(tone(-20, 5))

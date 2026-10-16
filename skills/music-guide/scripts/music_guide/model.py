@@ -49,6 +49,18 @@ class Conflict:
 
 
 @dataclass
+class Fact:
+    property: str
+    value: Any
+    unit: str
+    method: str
+    reason: str
+    confidence: Confidence = "high"
+    provenance: Provenance = "measured"
+    time_domain: str = "static"
+
+
+@dataclass
 class Diagnostic:
     code: str
     severity: Literal["info", "warning", "error"]
@@ -59,7 +71,17 @@ class Diagnostic:
 MAX_INTEGER_BITS = 1024
 
 
-def _check_finite(property: str, value: Any) -> None:
+def native(value: Any) -> Any:
+    """`value` with numpy scalars and arrays, nested at any depth, turned into plain Python numbers and lists."""
+    if isinstance(value, dict):
+        return {key: native(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [native(item) for item in value]
+    tolist = getattr(value, "tolist", None)
+    return native(tolist()) if tolist is not None and not isinstance(value, (str, bytes)) else value
+
+
+def check_finite(property: str, value: Any) -> None:
     """Reject values the JSON report cannot carry, in nested containers too."""
     pending = [value]
     while pending:
@@ -88,7 +110,7 @@ class Evidence:
             scope: str, time_domain: str, locator: str, method: str,
             provenance: Provenance, confidence: Confidence,
             reason: str) -> None:
-        _check_finite(property, value)
+        check_finite(property, value)
         self.observations.append(Observation(
             id=f"o{len(self.observations) + 1}", sourceIds=[source_id],
             property=property, value=value, unit=unit, scope=scope,

@@ -112,7 +112,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
                 _require_file(path, MAX_AUDIO_BYTES)
                 source.sha256 = _hash(path)
                 staged = Evidence()
-                audio.audio(path, source_id, staged, scope="mixdown" if role == "mixdown" else f"stem:{source_id}")
+                audio.audio(path, source_id, staged, "mixdown" if role == "mixdown" else f"stem:{source_id}", detail)
                 _merge(evidence, staged)
                 continue
             fmt = formats.BY_NAME[role] if role in FLAG_FORMATS else formats.resolve(path)
