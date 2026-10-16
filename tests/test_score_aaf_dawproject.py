@@ -440,5 +440,160 @@ class AafTest(ScoreCase):
                 self.assert_rejected(data, fragment, "s2")
 
 
+def daw_note(time, duration, key, vel="0.5", channel=0):
+    return f'<Note time="{time}" duration="{duration}" channel="{channel}" key="{key}" vel="{vel}" rel="0.5"/>'
+
+
+DAW_STRUCTURE = (
+    '<Structure>'
+    '<Track contentType="notes" id="t1" name="Bass"><Channel role="regular" id="c1"><Devices>'
+    '<ClapPlugin deviceID="surge" deviceName="Surge XT" deviceRole="instrument"/>'
+    '<Vst3Plugin deviceName="Hall Reverb" deviceRole="audioFX"/></Devices></Channel></Track>'
+    '<Track contentType="audio" id="t2" name="Drums"><Channel role="regular" id="c2"/></Track>'
+    '<Track contentType="audio notes" id="t3" name="Master"><Channel role="master" id="c3"><Devices>'
+    '<BuiltinDevice deviceName="Limiter" deviceRole="audioFX"/></Devices></Channel></Track></Structure>')
+DAW_ARRANGEMENT = (
+    '<Arrangement><Lanes timeUnit="beats">'
+    '<Lanes track="t1"><Clips>'
+    '<Clip time="0" duration="8"><Notes>' + daw_note(0, 1, 60) + daw_note(0, 1, 64) + daw_note(1, 1, 67)
+    + daw_note(4, 2, 72, "1.0") + '</Notes></Clip>'
+    '<Clip time="16" duration="4" playStart="2"><Notes>' + daw_note(1, 1, 50) + daw_note(2, 1, 52)
+    + daw_note(5, 4, 55) + daw_note(6, 1, 57) + '</Notes></Clip>'
+    '<Clip time="32" duration="8" contentTimeUnit="seconds"><Notes>' + daw_note(0.5, 0.5, 40) + '</Notes></Clip>'
+    '</Clips></Lanes>'
+    '<Lanes track="t2"><Clips>'
+    '<Clip time="0" duration="8" loopStart="0" loopEnd="2"><Clips><Clip time="0" duration="2" contentTimeUnit="beats">'
+    '<Warps contentTimeUnit="seconds" timeUnit="beats"><Audio channels="2" sampleRate="48000" duration="1.0">'
+    '<File path="C:\\Users\\secret\\audio\\Drum Loop.wav"/></Audio><Warp time="0" contentTime="0"/>'
+    '<Warp time="2" contentTime="1"/></Warps></Clip></Clips></Clip>'
+    '<Clip time="8" duration="4"/></Clips></Lanes>'
+    '<Lanes track="t3"><Clips/></Lanes></Lanes>'
+    '<Markers timeUnit="beats"><Marker time="0" name="Intro"/><Marker time="32" name="Drop"/></Markers>'
+    '<TempoAutomation unit="bpm" timeUnit="beats"><Target/><RealPoint time="16" value="90" interpolation="hold"/>'
+    '<RealPoint time="0" value="120" interpolation="hold"/></TempoAutomation>'
+    '<TimeSignatureAutomation timeUnit="beats"><Target/><TimeSignaturePoint time="0" numerator="4" denominator="4"/>'
+    '<TimeSignaturePoint time="32" numerator="3" denominator="4"/></TimeSignatureAutomation></Arrangement>')
+DAW_HEAD = ('<Project version="1.0"><Application name="Bitwig Studio" version="5.2"/><Transport>'
+            '<Tempo value="120" unit="bpm"/><TimeSignature numerator="4" denominator="4"/></Transport>')
+DAW_METADATA = ('<MetaData><Title>Demo</Title><Artist>Someone</Artist><Genre>House</Genre><Comment> </Comment>'
+                '<Bogus>ignored</Bogus></MetaData>')
+
+
+class DawProjectTest(ScoreCase):
+    def project(self, xml=None, metadata=DAW_METADATA, name="song.dawproject", extra=None):
+        members = {"project.xml": xml or DAW_HEAD + DAW_STRUCTURE + DAW_ARRANGEMENT + "</Project>"}
+        if metadata is not None:
+            members["metadata.xml"] = metadata
+        members.update(extra or {})
+        return self.zip(name, members)
+
+    def test_rich_project_values(self):
+        data = self.evidence("--project", self.project())
+        self.assertEqual(self.values(data, "dawproject.metadata"), [{"Title": "Demo", "Artist": "Someone", "Genre": "House"}])
+        self.assertEqual(self.values(data, "tempo"), [120])
+        self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0, "bpm": 120}, {"beat": 16, "bpm": 90}]])
+        self.assertEqual(self.values(data, "meter"), ["4/4"])
+        self.assertEqual(self.values(data, "dawproject.meter_map"),
+                         [[{"beat": 0, "meter": "4/4"}, {"beat": 32, "meter": "3/4"}]])
+        self.assertEqual([item["kind"] for item in self.values(data, "project.track")], ["instrument", "audio", "master"])
+        plugins = sorted((item["scope"], item["value"]["name"]) for item in data["observations"]
+                         if item["property"] == "project.plugin")
+        self.assertEqual(plugins, [("project_track:0", "Hall Reverb"), ("project_track:0", "Surge XT"),
+                                   ("project_track:2", "Limiter")])
+        self.assertEqual(self.by_scope(data, "project.clip_count"),
+                         {"project_track:0": 3, "project_track:1": 2, "project_track:2": 0})
+        self.assertEqual(self.values(data, "project.media_reference"), [{"basename": "Drum Loop.wav", "count": 1}])
+        self.assertNotIn("secret", json.dumps(data))
+        self.assertEqual(sorted((item["name"], item["position"]) for item in self.values(data, "project.marker")),
+                         [("Drop", 32), ("Intro", 0)])
+        notes = self.by_scope(data, "project.track_notes")["project_track:0"]
+        # First clip 4 notes; second clip keeps the notes at content 2 and 5 (the one at 1 is before playStart,
+        # the one at 6 starts after the clip ends); the seconds clip adds one note.
+        self.assertEqual(notes["noteCount"], 4 + 2 + 1)
+        codes = {item["code"] for item in data["diagnostics"]}
+        self.assertTrue({"dawproject_looped_clips", "dawproject_notes_outside_clip", "dawproject_note_timing"} <= codes)
+
+    def test_clip_offsets_windows_and_seconds_conversion_with_tempo_automation(self):
+        data = self.evidence("--project", self.project(), "--detail", "full")
+        written = sorted((item["value"]["pitch"], item["value"]["startBeat"], item["value"]["endBeat"],
+                          item["value"]["velocity"]) for item in data["observations"]
+                         if item["property"] == "project.note")
+        by_pitch = {pitch: (start, end, velocity) for pitch, start, end, velocity in written}
+        self.assertEqual(by_pitch[52], (16, 17, 64))
+        # The note at content 5 lasting 4 beats starts at 19 and is cut at the clip end (beat 20).
+        self.assertEqual(by_pitch[55][:2], (19, 20))
+        self.assertNotIn(50, by_pitch)
+        self.assertNotIn(57, by_pitch)
+        self.assertEqual(by_pitch[72], (4, 6, 127))
+        # 32 beats is 18.667 s with 120 BPM for 16 beats and 90 BPM after; 0.5 s later is beat 32.75.
+        start, end, _ = by_pitch[40]
+        self.assertAlmostEqual(start, 32.75)
+        self.assertAlmostEqual(end, 33.5)
+        self.assertEqual(len(written), 7)
+
+    def test_seconds_content_uses_constant_tempo_and_needs_one(self):
+        arrangement = ('<Arrangement><Lanes timeUnit="beats"><Lanes track="t1"><Clips>'
+                       '<Clip time="4" duration="8" contentTimeUnit="seconds"><Notes>' + daw_note(1, 0.5, 60)
+                       + '</Notes></Clip></Clips></Lanes></Lanes></Arrangement>')
+        constant = DAW_HEAD + DAW_STRUCTURE + arrangement + "</Project>"
+        data = self.evidence("--project", self.project(constant), "--detail", "full")
+        note = next(item["value"] for item in data["observations"] if item["property"] == "project.note")
+        self.assertEqual((note["startBeat"], note["endBeat"]), (6, 7))
+        untempoed = ('<Project version="1.0">' + DAW_STRUCTURE + arrangement + "</Project>")
+        data = self.evidence("--project", self.project(untempoed))
+        self.assertEqual(self.by_scope(data, "project.clip_count"), {"project_track:0": 1})
+        self.assertEqual(self.by_scope(data, "project.track_notes"), {})
+        warning = next(item for item in data["diagnostics"] if item["code"] == "dawproject_no_tempo_for_seconds")
+        self.assertEqual(warning["severity"], "warning")
+
+    def test_summary_and_full_differ_only_by_individual_notes(self):
+        summary = self.evidence("--project", self.project())
+        full = self.evidence("--project", self.project(), "--detail", "full")
+        strip = lambda data: [(item["property"], item["value"]) for item in data["observations"]
+                              if item["property"] != "project.note"]
+        self.assertEqual(strip(summary), strip(full))
+        self.assertEqual(len([item for item in full["observations"] if item["property"] == "project.note"]), 7)
+
+    def test_tempo_conflicts_with_declaration(self):
+        declarations = self.write("declarations.json", json.dumps(
+            [{"property": "tempo", "value": 100, "unit": "BPM", "scope": "project"}]))
+        data = self.evidence("--project", self.project(), "--declarations", declarations)
+        self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
+
+    def test_bad_optional_parts_keep_the_project_and_warn(self):
+        bad_automation = DAW_ARRANGEMENT.replace('<TempoAutomation unit="bpm"', '<TempoAutomation unit="percent"')
+        data = self.evidence("--project", self.project(DAW_HEAD + DAW_STRUCTURE + bad_automation + "</Project>"))
+        self.assertEqual(self.values(data, "project.tempo_map"), [])
+        self.assertEqual(self.values(data, "tempo"), [120])
+        self.assertTrue(any(item["code"] == "dawproject_tempo_automation_unit" for item in data["diagnostics"]))
+        for metadata in ("<MetaData><Title>unterminated", '<!DOCTYPE MetaData [<!ENTITY x "y">]><MetaData/>',
+                         "<Other/>"):
+            with self.subTest(metadata=metadata[:20]):
+                data = self.evidence("--project", self.project(metadata=metadata))
+                self.assertEqual(self.values(data, "dawproject.metadata"), [])
+                self.assertEqual(self.values(data, "project.track_count"), [3])
+                self.assertTrue(any(item["code"] == "dawproject_metadata_unreadable" for item in data["diagnostics"]))
+        self.assertEqual(self.values(self.evidence("--project", self.project(metadata=None)), "project.track_count"), [3])
+
+    def test_malformed_arrangements_are_rejected_atomically(self):
+        def project(arrangement):
+            return self.project(DAW_HEAD + DAW_STRUCTURE + arrangement + "</Project>")
+        clip = '<Arrangement><Lanes track="t1"><Clips>{}</Clips></Lanes></Arrangement>'
+        cases = {
+            "key": clip.format('<Clip time="0" duration="1"><Notes>' + daw_note(0, 1, 200) + '</Notes></Clip>'),
+            "time": clip.format('<Clip time="soon" duration="1"/>'),
+            "unit": clip.format('<Clip time="0" contentTimeUnit="days"/>'),
+            "missing": clip.format('<Clip duration="1"/>'),
+            "negative": clip.format('<Clip time="0" duration="1"><Notes>' + daw_note(0, -1, 60) + '</Notes></Clip>'),
+        }
+        deep = "<Lanes>" * 40 + "</Lanes>" * 40
+        cases["deep"] = f"<Arrangement>{deep}</Arrangement>"
+        for name, arrangement in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", project(arrangement), mixdown=True)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+
 if __name__ == "__main__":
     unittest.main()
