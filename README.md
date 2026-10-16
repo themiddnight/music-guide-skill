@@ -6,6 +6,8 @@ Music Guide works across DAWs. A rendered mixdown is the starting point for clai
 
 The plugin combines a conversational skill with local Python tools. The tools extract evidence; your host assistant explains it and proposes changes. Claims retain their source and uncertainty. Missing information stays unknown.
 
+Audio analysis includes beat and downbeat candidates, meter and swing, chord timelines, rhythm and syncopation, repeated section letters, energy and brightness curves, heuristic mood alternatives, and a predominant melody estimate. All musical interpretations are marked inferred with low confidence. Read the [estimate methods and limits](skills/music-guide/references/audio-estimates.md) and [verification record](docs/verification.md) before relying on them.
+
 ## Install through a marketplace
 
 Requirements:
@@ -71,7 +73,7 @@ The requirements file is included in the installed skill, so no repository clone
 
 ### Install from a local checkout
 
-To test a checkout or an unpacked release, replace the GitHub source in either marketplace command with its absolute directory:
+Git-backed marketplaces install pushed commits. To test unpublished local changes or an unpacked release, replace the GitHub source in either marketplace command with its absolute directory:
 
 ```sh
 codex plugin marketplace add /absolute/path/to/music-guide
@@ -102,7 +104,7 @@ Start with the result you want. Provide the relevant file paths and any creative
 
 For claims about the sound of a specific track, supply a mixdown as WAV, AIFF, FLAC, MP3 or another format libsndfile decodes. Add a project file, MIDI or stems when you have them. You do not need to export every file type, and a project file without audio still supports questions about tempo, key, structure and parts.
 
-An analysis can include source-backed observations, unresolved conflicts, missing evidence, and prioritized experiments. When the host cannot hear audio, Music Guide says so and avoids claims about audible instruments, mood, or genre. Stored project settings describe intent and may differ from the render.
+An analysis can include source-backed observations, unresolved conflicts, missing evidence, and prioritized experiments. When the host cannot hear audio, Music Guide says so and avoids unsupported claims about audible instruments or genre. Numerical mood estimates remain low-confidence interpretations with alternatives. Stored project settings describe intent and may differ from the render.
 
 ## Apply it to your workflow
 
@@ -164,9 +166,9 @@ Add whichever optional inputs you have:
   --declarations /path/to/declarations.json > evidence.json
 ```
 
-At least one input is required; the mixdown is optional. Repeat an input flag for multiple files. `--project` detects the format from the file's extension and content, and accepts directory packages such as `.logicx`. `--midi`, `--solna` and `--dawproject` name those formats explicitly. Stems are measured independently; the tools do not align them or reconstruct the mix. A missing or corrupt optional source produces a diagnostic while the other results remain available. An unreadable mixdown exits with code 2.
+At least one input is required. A mixdown is required for claims about the rendered track; without it the tool reports stored intent and independent stem evidence only. Repeat an input flag for multiple files. `--project` detects the format from the file's extension and content, and accepts directory packages such as `.logicx`. `--midi`, `--solna` and `--dawproject` name those formats explicitly. Stems are measured independently; the tools do not align them or reconstruct the mix. A missing or corrupt optional source produces a diagnostic while the other results remain available. An unreadable mixdown exits with code 2.
 
-The default `--detail summary` reports one note summary per track. `--detail full` also lists every note, which can make the report several megabytes for a dense project.
+The default `--detail summary` reports bounded musical segments and one note summary per track. `--detail full` adds beat times, per-unit chords, feature detail, melody frames, and individual stored notes, which can make the report several megabytes. Lists are capped and every truncation is diagnosed. `--analysis-backend builtin` selects the only shipped audio backend.
 
 A declarations file records information you supply rather than facts measured by the tool:
 
@@ -197,7 +199,7 @@ Evidence distinguishes `measured`, `extracted`, `inferred`, and `user_declared` 
 
 Automatic conflict detection covers static tempo and meter claims with the same scope; tempo values within 0.01 BPM count as equal. A MIDI file with a single tempo event at the start yields a static tempo claim, while a changing tempo stays a map. Inferred audio estimates never raise automatic conflicts.
 
-Silence produces `null` loudness values with a diagnostic. Samples at full scale indicate possible clipping, not certain audible distortion. Tempo and key estimates are candidates: tempo may be half or double, and the key estimate knows only major and minor, so modal or pentatonic music can be mislabelled. The tools do not recognise instruments, mood, or genre, render music, or generate artwork. Project files are never used to open the media they reference.
+Silence produces `null` loudness values with a diagnostic. Samples at full scale indicate possible clipping, not certain audible distortion. Tempo and key estimates are candidates: tempo may be half or double, and the key estimate knows only major and minor, so modal or pentatonic music can be mislabelled. The tools do not recognise instruments or genre, render music, or generate artwork. Mood labels are low-confidence numerical heuristics with alternatives, not emotion recognition. Project files are never used to open the media they reference.
 
 The local tools do not upload source files. Your host assistant still processes the conversation and any evidence or files you give it under that host's settings.
 
@@ -213,6 +215,12 @@ python3 install.py --dest /path/to/skills/music-guide
 The installer copies only `skills/music-guide`. It does not install Python packages or change host settings. Repeating an identical install is safe, including after use. Conflicting content is refused without deletion. The copy runs without this checkout.
 
 Codex's legacy user destination is `~/.codex/skills/music-guide`, or `<CODEX_HOME>/skills/music-guide` when configured. Claude Code's user skill directory is `~/.claude/skills/music-guide`. Restart the host after installation and set up a separate Python environment as described above.
+
+## Extend the analyzers
+
+The audio backend registry separates beat, meter, chord, and melody implementations from file decoding. New backends must return the same result/report contracts and preserve provenance, failure isolation, output caps, and diagnostics. `builtin` is the only shipped backend. No madmom, BTC, stem separation, or trained emotion model is installed.
+
+The next accuracy work needs independently aligned chord and melody annotations, broader style coverage, and human review. Native project support remains the inspected subset listed above. Unknown formats retain actionable export fallbacks.
 
 ## Update or uninstall
 

@@ -3,7 +3,7 @@
 
     benchmark.py [--six-hour] [--detail summary|full] [--timeout SECONDS]
 
-The 4 minute stereo file always runs. The 6 hour mono file at 8 kHz takes minutes and writes about 350 MiB to a
+The 4 minute stereo file always runs. The 6 hour mono file at 8 kHz takes minutes and writes about 330 MiB to a
 temporary directory, so it runs only with --six-hour. Each file is analyzed by a fresh interpreter, and the child's
 own peak resident set comes from `wait4`, so one case never inherits another's peak. That per-child peak was verified
 on macOS only, where `ru_maxrss` is in bytes. The Linux branch assumes kilobytes and has not been run.

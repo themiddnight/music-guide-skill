@@ -1,0 +1,68 @@
+{
+  "revision": "8afb30586db317a266b63d53bdb3d7f0f75f153b",
+  "python": "3.14.3 (main, Feb  4 2026, 01:51:49) [Clang 21.1.4 ]",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "loadBefore": "5:00  up 14 days, 17:34, 1 user, load averages: 6.47 8.06 6.75",
+  "runs": [
+    {
+      "case": "4 minute stereo 44.1 kHz",
+      "run": 1,
+      "seconds": 2.996431832900271,
+      "peakMiB": 128.359375,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    },
+    {
+      "case": "4 minute stereo 44.1 kHz",
+      "run": 2,
+      "seconds": 2.831962834112346,
+      "peakMiB": 135.328125,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    },
+    {
+      "case": "4 minute stereo 44.1 kHz",
+      "run": 3,
+      "seconds": 2.8358651660382748,
+      "peakMiB": 135.421875,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    },
+    {
+      "case": "4 minute stereo 44.1 kHz",
+      "run": 4,
+      "seconds": 3.13771529099904,
+      "peakMiB": 130.640625,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    },
+    {
+      "case": "4 minute stereo 44.1 kHz",
+      "run": 5,
+      "seconds": 2.820351667003706,
+      "peakMiB": 132.15625,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    },
+    {
+      "case": "6 hour mono 8 kHz",
+      "run": 1,
+      "seconds": 47.673838790971786,
+      "peakMiB": 348.84375,
+      "exit": 0,
+      "errors": [],
+      "stderr": "",
+      "verdict": "within budget"
+    }
+  ]
+}
