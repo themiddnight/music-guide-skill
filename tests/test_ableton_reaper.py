@@ -167,6 +167,19 @@ class AbletonTest(DawBase):
         self.assertEqual(self.one(data, "ableton.session_clip_count", "project_track:0")["value"], 1)
         self.assertEqual(self.facts(data, "project.sample_rate"), [])
 
+    def test_plugin_devices_with_empty_names_are_never_labelled_builtin(self):
+        devices = ('<PluginDevice Id="0"><PluginDesc><VstPluginInfo><PlugName Value=""/></VstPluginInfo></PluginDesc></PluginDevice>'
+                   '<AuPluginDevice Id="1"/><Vst3PluginDevice Id="2"><PluginDesc><Vst3PluginInfo><Name Value="  "/></Vst3PluginInfo>'
+                   '</PluginDesc></Vst3PluginDevice><Compressor2 Id="3"/><MxDeviceAudioEffect Id="4"/>')
+        data = self.evidence("--project", self.write(live_set(midi_track("Lead", devices=devices))))
+        plugins = self.facts(data, "project.plugin")
+        self.assertEqual([item["value"]["name"] for item in plugins], ["PluginDevice", "AuPluginDevice", "Vst3PluginDevice"])
+        for item in plugins:
+            self.assertEqual((item["scope"], item["confidence"]), ("project_track:0", "low"))
+            self.assertIn("plugin name is empty", item["confidenceReason"])
+        builtin = [(item["value"]["name"], item["value"]["builtin"]) for item in self.facts(data, "ableton.device")]
+        self.assertEqual(builtin, [("Compressor2", True), ("MxDeviceAudioEffect", False)])
+
     def test_arrangement_notes_are_positioned_and_timing_is_declared_approximate(self):
         data = self.evidence("--project", self.write(LIVE_11))
         notes = self.one(data, "project.track_notes", "project_track:0")

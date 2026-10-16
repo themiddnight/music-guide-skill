@@ -8,12 +8,15 @@ from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import PITCH_CLASSES, Note, summarize_notes
 from ..project import ProjectFacts, TrackKind, plausible_meter
 from .common import MAX_GZIP_BYTES, MAX_ZIP_BYTES, _finite_number, _gunzip_bounded, _local, _parse_xml, _read_bounded
+from .graded import GradedFacts
 from .listing import capped
 
 METHOD = "ableton-als-xml"
 TRACK_TAGS: dict[str, TrackKind] = {"AudioTrack": "audio", "MidiTrack": "midi", "GroupTrack": "group",
                                     "ReturnTrack": "return"}
 CLIP_TAGS = frozenset({"MidiClip", "AudioClip"})
+PLUGIN_DEVICE_TAGS = frozenset({"PluginDevice", "AuPluginDevice", "Vst3PluginDevice"})
+UNNAMED_PLUGIN = "The plugin name is empty in the set, so the device element name stands in for it."
 PLUGIN_INFO = (("VstPluginInfo", "PlugName"), ("Vst3PluginInfo", "Name"), ("AuPluginInfo", "Name"))
 MAX_NOTES = 1_000_000
 EPSILON = 1e-9
@@ -376,9 +379,12 @@ def _parse(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
         arrangement, session = _track_clips(facts, track)
         arrangement_total += arrangement
         session_total += session
+    unnamed = GradedFacts(evidence, source_id, METHOD, detail, grade="low", caveat=UNNAMED_PLUGIN)
     for plugin, element, index, locator in capped(devices, "devices", source_id, evidence):
         if plugin is not None:
             facts.plugin(plugin, index, locator)
+        elif element in PLUGIN_DEVICE_TAGS:
+            unnamed.plugin(element, index, locator)
         else:
             evidence.add(source_id, "ableton.device",
                          {"name": element, "track": index, "builtin": not element.startswith("MxDevice")}, "device",
