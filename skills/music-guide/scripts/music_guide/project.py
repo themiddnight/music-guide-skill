@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping, Sequence, get_args
 
 from .adapters.common import _finite_number, _media_basename
@@ -88,15 +88,16 @@ class ProjectFacts:
     detail: Detail
     # Scope of facts that are not about one track, e.g. "alternative:000" for a package that stores several arrangements.
     scope: str = "project"
-    _seen: Counter = field(default_factory=Counter, init=False, repr=False, compare=False)
 
     def _add(self, property: str, value: Any, unit: str, locator: str, reason: str, *,
              scope: str | None = None, time_domain: str = "static", confidence: Confidence = "high") -> None:
         if property in LISTED_PROPERTIES:
-            self._seen[property] += 1
+            listed = self.evidence.listed
+            key = (self.source_id, property)
+            listed[key] += 1
             limit = _list_limit(property)
-            if self._seen[property] > limit:
-                if self._seen[property] == limit + 1:
+            if listed[key] > limit:
+                if listed[key] == limit + 1:
                     self.evidence.diagnostics.append(limit_reached(LISTED_PROPERTIES[property], limit, self.source_id))
                 return
         self.evidence.add(self.source_id, property, value, unit, self.scope if scope is None else scope, time_domain, locator,

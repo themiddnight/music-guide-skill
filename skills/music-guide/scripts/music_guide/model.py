@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -80,6 +81,8 @@ class Evidence:
     conflicts: list[Conflict] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
+    # Items listed so far per (source id, property), so a listing cap holds for a source however many writers it has.
+    listed: Counter = field(default_factory=Counter, init=False, repr=False, compare=False)
 
     def add(self, source_id: str, property: str, value: Any, unit: str,
             scope: str, time_domain: str, locator: str, method: str,

@@ -500,6 +500,24 @@ class ObservationCapTest(CliCase):
                 self.assertEqual(len(warnings), 1)
                 self.assertIn(property.split(".")[1].replace("_", " "), warnings[0].message)
 
+    def test_cap_counts_per_source_across_every_facts_instance(self):
+        from music_guide.adapters.graded import GradedFacts
+        from music_guide.model import Evidence
+        from music_guide.project import ProjectFacts
+        evidence = Evidence()
+        plain = ProjectFacts(evidence, "s1", "test", "summary")
+        graded = GradedFacts(evidence, "s1", "test", "summary", grade="low", caveat="x")
+        other = ProjectFacts(evidence, "s2", "test", "summary")
+        for number in range(3000):
+            plain.plugin(f"A{number}", None, "loc")
+            graded.plugin(f"B{number}", None, "loc")
+        other.plugin("C", None, "loc")
+        counts = {source: sum(item.property == "project.plugin" and item.sourceIds == [source] for item in evidence.observations)
+                  for source in ("s1", "s2")}
+        self.assertEqual(counts, {"s1": 5000, "s2": 1})
+        warnings = [item for item in evidence.diagnostics if item.code == "project_list_truncated"]
+        self.assertEqual([item.sourceId for item in warnings], ["s1"])
+
     def test_full_detail_note_listing_is_capped_on_project_facts(self):
         from music_guide import project
         from music_guide.model import Evidence
