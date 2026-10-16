@@ -7,6 +7,7 @@ from typing import Any, Literal, Sequence, TypeVar, Union
 from ..model import Confidence, Detail, Fact, check_finite, native
 
 ESTIMATE_PREFIX = "Estimate, not a fact: "
+FULL_LIMIT = 50_000
 
 
 @dataclass(frozen=True)

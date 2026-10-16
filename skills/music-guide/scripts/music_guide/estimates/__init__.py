@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 
 from ..model import Diagnostic, Fact
 from . import beats, harmony
+from .beats import beat_grid, meter
 from .common import Outcome, ReportContext, Skip
 from .store import FeatureStore
 
@@ -19,6 +20,8 @@ Role = Literal["mixdown", "stem"]
 @dataclass(frozen=True)
 class Backend:
     name: str
+    beats: Callable[..., Any] = beat_grid
+    meter: Callable[..., Any] = meter
 
 
 BACKENDS = {"builtin": Backend("builtin")}
@@ -43,8 +46,12 @@ def analyze(store: FeatureStore, backend: Backend, role: Role) -> list[tuple[str
         return outcome
 
     run("pitch class profile", harmony.pitch_profile, store)
-    run("tempo estimate", beats.tempo, store)
+    tempo = run("tempo estimate", beats.tempo, store)
     run("key estimate", harmony.key, store)
+    grid = run("beat grid", backend.beats, store, tempo)
+    if role == "mixdown":
+        run("meter estimate", backend.meter, store, grid)
+        run("swing estimate", beats.swing, store, grid)
     return outcomes
 
 

@@ -1,6 +1,6 @@
 """The feature store: compact per-frame features recorded in the one streaming pass over the audio.
 
-Two time grids. Onset frame j is centred on decimated sample j * ONSET_HOP, so its time is j / onset_rate. Row k
+Two time grids. Onset frame j is labelled at decimated sample j * ONSET_HOP, so its time is j / onset_rate. Row k
 is the 100 ms of original samples [k * rate // 10, (k + 1) * rate // 10), the LoudnessMeter segment grid, and its
 spectrum is one window centred on that span.
 """
@@ -17,6 +17,9 @@ FEATURE_RATE = 11025
 # Per-channel FFTs cost time linearly in channels, so wider files are folded to this many groups.
 MAX_FEATURE_CHANNELS = 8
 ONSET_SIZE, ONSET_HOP = 1024, 128
+# Log-magnitude flux under a Hann window peaks while an attack is still about 320 samples (29 ms) after the window
+# centre, measured on clicks at 44.1 and 48 kHz. Frames are labelled at that point so onset times match attacks.
+ONSET_LEAD = 320
 ONSET_BAND_EDGES = (150.0, 2000.0)
 ROW_RATE = 10
 ROW_SIZE = 8192
@@ -87,7 +90,7 @@ class FeatureRecorder:
         decimated = expected_frames // self.factor + 1
 
         self.onset_framer = Framer(ONSET_SIZE, ONSET_HOP)
-        self.onset_framer.push(np.zeros((ONSET_SIZE // 2, groups)))
+        self.onset_framer.push(np.zeros((ONSET_SIZE // 2 + ONSET_LEAD, groups)))
         self.onset_window = signal.windows.hann(ONSET_SIZE, sym=False)
         band = np.searchsorted(ONSET_BAND_EDGES, np.fft.rfftfreq(ONSET_SIZE, 1 / self.decimated_rate), side="right")
         self.onset_bands = np.eye(3)[band]

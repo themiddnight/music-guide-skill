@@ -16,16 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from signals import click_track, progression, record  # noqa: E402
 from support import SKILL, run_cli  # noqa: E402
 
+from music_guide import estimates  # noqa: E402
 from music_guide.estimates import beats, store  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
-LABELS = ("pitch class profile", "tempo estimate", "key estimate")
+LABELS = ("pitch class profile", "tempo estimate", "key estimate", "beat grid", "meter estimate", "swing estimate")
 CHORDS = [(62, 65, 69), (65, 69, 72), (58, 62, 65), (57, 61, 64)]
 
 
 def music(seconds: float) -> np.ndarray:
-    clicks, _, _ = click_track(120, 4, seconds)
+    clicks, _, _ = click_track(120, 4, seconds, offbeats=True)
     chords = progression(CHORDS, 4, 120, repeats=int(seconds // 8) + 1)[:len(clicks)]
     return clicks + chords
 
@@ -67,17 +68,21 @@ class PipelineTest(unittest.TestCase):
     def test_projected_bytes_at_six_hours(self):
         self.assertLess(store.projected_bytes(6 * 3600, 22050), 400 * 2 ** 20)
 
-    def test_failed_analyzer_keeps_loudness(self):
+    def test_failed_analyzer_keeps_loudness_and_names_dependents(self):
         def broken(*_):
             raise ZeroDivisionError("boom")
-        with mock.patch.object(beats, "tempo", broken):
+        with mock.patch.dict(estimates.BACKENDS, {"builtin": estimates.Backend("builtin", beats=broken)}):
             data = self.evidence(np.stack([music(20)] * 2, axis=1))
         self.assertEqual(self.messages(data, "estimate_failed"),
-                         ["No tempo estimate: the analyzer failed with ZeroDivisionError: boom"])
+                         ["No beat grid: the analyzer failed with ZeroDivisionError: boom"])
         self.assertEqual(next(item["severity"] for item in data["diagnostics"] if item["code"] == "estimate_failed"),
                          "warning")
-        self.assertIn("audio.integrated_loudness", data["facts"])
-        self.assertIn("audio.key_estimate", data["facts"])
+        skipped = self.messages(data, "estimate_skipped")
+        for label in ("meter estimate", "swing estimate"):
+            self.assertIn(f"No {label}: needs the beat grid, which was not produced: the analyzer failed with"
+                          " ZeroDivisionError: boom", skipped)
+        for kept in ("audio.integrated_loudness", "audio.tempo_estimate", "audio.key_estimate"):
+            self.assertIn(kept, data["facts"])
 
     def test_failed_report_is_isolated(self):
         def broken(*_):
@@ -107,9 +112,10 @@ class PipelineTest(unittest.TestCase):
         samples = np.stack([music(40)] * 2, axis=1)
         summary, full = self.evidence(samples), self.evidence(samples, "--detail", "full", name="full.wav")
         self.assertEqual(self.messages(summary, "estimate_failed") + self.messages(full, "estimate_failed"), [])
-        estimates = {"audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline"}
-        self.assertLessEqual(estimates, set(summary["facts"]))
-        for name in estimates:
+        names = {"audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline", "audio.beat_grid",
+                 "audio.meter_estimate", "audio.swing_ratio"}
+        self.assertLessEqual(names, set(summary["facts"]))
+        for name in names:
             for data in (summary, full):
                 fact = data["facts"][name]
                 self.assertEqual((fact["provenance"], fact["confidence"]), ("inferred", "low"))
@@ -130,7 +136,8 @@ class PipelineTest(unittest.TestCase):
                                   subtype="MPEG_LAYER_III")
         except (sf.LibsndfileError, ValueError, TypeError) as error:
             self.skipTest(f"libsndfile cannot write MP3: {error}")
-        names = ("audio.pitch_class_profile", "audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline")
+        names = ("audio.pitch_class_profile", "audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline",
+                 "audio.beat_grid", "audio.meter_estimate", "audio.swing_ratio")
         for name in names:
             with self.subTest(name=name):
                 self.assertIn("12 channels were folded into 8 groups", folded["facts"][name]["confidenceReason"])
