@@ -513,7 +513,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),
             ("song.mmp", b"<lmms-project/>", "lmms-project", "Export MIDI"),
             ("song.mmpz", b"\x00\x00\x01\x00x", "lmms-project", "Export MIDI"),
-            ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
         ]
         for name, content, adapter, hint in inventory:

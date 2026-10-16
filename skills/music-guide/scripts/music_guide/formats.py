@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import dawproject, midi, musescore, musicxml, solna
+from .adapters import aaf, dawproject, midi, musescore, musicxml, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -78,7 +78,7 @@ FORMATS: tuple[ProjectFormat, ...] = (
     ProjectFormat("lmms-project", "LMMS project", (".mmp", ".mmpz"), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a WAV mixdown with File > Export and the tracks with File > Export MIDI."),
     ProjectFormat("aaf", "AAF interchange file", (".aaf",), "file", MAX_ZIP_BYTES,
-                  _signature(COMPOUND_FILE, b"<", text=True), None,
+                  _signature(COMPOUND_FILE, b"<", text=True), aaf.aaf,
                   "Export a mixdown and stems, or a DAWproject or MIDI file if the source application supports it."),
     ProjectFormat("omf", "OMF interchange file", (".omf",), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a mixdown and stems, or a DAWproject or MIDI file if the source application supports it."),

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -8,6 +11,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import aaf2
 import jsonschema
 import numpy as np
 import soundfile as sf
@@ -287,6 +291,153 @@ class MuseScoreTest(ScoreCase):
                 data = self.evidence("--project", path, mixdown=True)
                 self.assertEqual(data["sources"][1]["status"], "error")
                 self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+
+def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True):
+    """A composition with two sound slots, a picture slot, source clips and markers, written by pyaaf2."""
+    with aaf2.open(str(path), "w") as f:
+        ident = f.header["IdentificationList"].value[0]
+        ident["ProductName"].value = "Example DAW"
+        ident["CompanyName"].value = "Example Co"
+        ident["ProductVersionString"].value = "9.1"
+        source = f.create.SourceMob("Kick source")
+        descriptor = f.create.WAVEDescriptor()
+        descriptor["SampleRate"].value = 48000
+        descriptor["Length"].value = 96000
+        descriptor["ContainerFormat"].value = f.dictionary.lookup_containerdef("AAF")
+        locator = f.create.NetworkLocator()
+        locator["URLString"].value = "file:///Volumes/Secret%20Drive/Samples/Kick%20Drum.wav"
+        descriptor["Locator"].append(locator)
+        fmt = struct.pack("<HHIIHH", 1, 1, 48000, 96000, 2, 16)
+        descriptor["Summary"].value = bytearray(b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt)) + b"WAVEfmt "
+                                                + struct.pack("<I", len(fmt)) + fmt)
+        source.descriptor = descriptor
+        source.create_empty_slot(edit_rate=48000, media_kind="sound", slot_id=1)
+        f.content.mobs.append(source)
+        master = f.create.MasterMob("Kick")
+        master_slot = master.create_timeline_slot(48000, slot_id=1)
+        clip = f.create.SourceClip(media_kind="sound")
+        clip.mob, clip.slot, clip.start, clip.length = source, source.slot_at(1), 0, 96000
+        master_slot.segment = clip
+        f.content.mobs.append(master)
+        composition = f.create.CompositionMob("Song Mix")
+        if top_level:
+            composition.usage = "Usage_TopLevel"
+        for number, (clips, rate) in enumerate(zip((2, 1), track_rates), 1):
+            slot = composition.create_empty_sequence_slot(edit_rate=rate, media_kind="sound")
+            slot.name = f"Track {number}"
+            for _ in range(clips):
+                slot.segment.components.append(master.create_source_clip(slot_id=1))
+        composition.create_picture_slot(edit_rate=25).name = "Video"
+        if markers:
+            event_slot = f.create.EventMobSlot()
+            event_slot.slot_id, event_slot.name, event_slot.edit_rate = 9, "Markers", aaf2.rational.AAFRational(48000, 1)
+            events = f.create.Sequence(media_kind="DescriptiveMetadata")
+            events["Components"].value = []
+            for position, text in ((48000, "Verse"), (288000, "Chorus")):
+                marker = f.create.DescriptiveMarker()
+                marker["Position"].value = position
+                marker["Comment"].value = text
+                events["Components"].append(marker)
+            event_slot.segment = events
+            composition.slots.append(event_slot)
+        f.content.mobs.append(composition)
+
+
+class AafTest(ScoreCase):
+    def run_cli(self, *args, mixdown=True):
+        # Zero tolerance for stray warnings from the AAF parser or its file handles.
+        prefix = ["--mixdown", str(self.mix)] if mixdown else []
+        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *prefix, *map(str, args)],
+                              cwd=self.dir, text=True, capture_output=True,
+                              env={**os.environ, "PYTHONWARNINGS": "error"})
+
+    def make(self, name="mix.aaf", **options):
+        path = self.dir / name
+        build_aaf(path, **options)
+        return path
+
+    def test_composition_tracks_clips_markers_media_and_application(self):
+        path = self.make()
+        before = hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
+        data = self.evidence("--project", path)
+        self.assertEqual(data["sources"][0]["adapter"], "aaf")
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "project.application"), ["Example DAW 9.1"])
+        self.assertEqual(self.values(data, "aaf.company"), ["Example Co"])
+        self.assertEqual(self.values(data, "aaf.mob_counts"), [{"composition": 1, "master": 1, "source": 1}])
+        self.assertEqual(self.values(data, "aaf.composition"), [{"name": "Song Mix", "usage": "Usage_TopLevel", "slotCount": 4}])
+        self.assertEqual(self.values(data, "project.track_count"), [3])
+        tracks = self.by_scope(data, "project.track")
+        self.assertEqual({scope: (item["name"], item["kind"]) for scope, item in tracks.items()}, {
+            "project_track:0": ("Track 1", "audio"), "project_track:1": ("Track 2", "audio"),
+            "project_track:2": ("Video", "unknown")})
+        self.assertEqual(self.by_scope(data, "project.clip_count"),
+                         {"project_track:0": 2, "project_track:1": 1, "project_track:2": 0})
+        slots = self.by_scope(data, "aaf.slot")
+        self.assertEqual((slots["project_track:0"]["mediaKind"], slots["project_track:0"]["editRate"],
+                          slots["project_track:0"]["lengthSeconds"]), ("sound", 48000, 4))
+        self.assertEqual((slots["project_track:2"]["mediaKind"], slots["project_track:2"]["editRate"]), ("picture", 25))
+        self.assertEqual(self.values(data, "project.sample_rate"), [48000])
+        self.assertEqual(self.values(data, "project.media_reference"), [{"basename": "Kick Drum.wav", "count": 1}])
+        self.assertEqual(sorted((item["name"], item["position"], item["unit"]) for item in self.values(data, "project.marker")),
+                         [("Chorus", 6, "seconds"), ("Verse", 1, "seconds")])
+        self.assertNotIn("Secret", json.dumps(data))
+        self.assertFalse(any(item["property"] in {"tempo", "meter"} for item in data["observations"]))
+        full = self.evidence("--project", path, "--detail", "full")
+        self.assertEqual([(item["property"], item["value"]) for item in full["observations"]],
+                         [(item["property"], item["value"]) for item in data["observations"]])
+        self.assertEqual((hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns), before)
+
+    def test_disagreeing_sound_rates_make_no_single_sample_rate(self):
+        data = self.evidence("--project", self.make(track_rates=(48000, 44100)))
+        self.assertEqual(self.values(data, "project.sample_rate"), [])
+        self.assertEqual(self.values(data, "aaf.sample_rates"), [[44100, 48000]])
+
+    def test_file_without_top_level_composition_warns_and_reports_no_tracks(self):
+        data = self.evidence("--project", self.make(top_level=False, markers=False))
+        self.assertEqual(self.values(data, "project.track_count"), [])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "aaf_no_top_level_composition")
+        self.assertEqual(warning["severity"], "warning")
+
+    def test_container_warnings_become_diagnostics(self):
+        raw = bytearray(self.make().read_bytes())
+        struct.pack_into("<I", raw, 0x2C, 2)
+        data = self.evidence("--project", self.write("odd-header.aaf", bytes(raw)))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        messages = [item["message"] for item in data["diagnostics"] if item["code"] == "aaf_container_warning"]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("fat sector count", messages[0])
+
+    def test_tempo_declaration_is_not_contradicted_by_a_file_without_tempo(self):
+        declarations = self.write("declarations.json", json.dumps(
+            [{"property": "tempo", "value": 120, "unit": "BPM", "scope": "project"}]))
+        data = self.evidence("--project", self.make(), "--declarations", declarations)
+        self.assertEqual(data["conflicts"], [])
+
+    def test_unsupported_and_corrupt_files_are_source_errors(self):
+        good = self.make().read_bytes()
+        bomb = bytearray(good)
+        with aaf2.open(str(self.dir / "bomb.aaf"), "w"):
+            pass
+        (self.dir / "bomb.aaf").write_bytes(bytes(bomb))
+        with aaf2.open(str(self.dir / "bomb.aaf"), "rw") as f:
+            index = next(entry for entry in f.cfb.listdir_dict("/Header-2/Content-3b03").values()
+                         if entry.name.endswith(" index"))
+            stream = index.open("rw")
+            stream.write(struct.pack("<I", 0xFFFFFFFF))
+        cases = {
+            "xml.aaf": (b'<?xml version="1.0"?><AAF/>', "XML"),
+            "text.aaf": (b"\xd0\xcf\x11\xe0 not quite", "does not match"),
+            "truncated.aaf": (good[:4096], "cannot read AAF"),
+            "header.aaf": (good[:512], "cannot read AAF"),
+            "zeroed.aaf": (good[:8] + bytes(len(good) - 8), "cannot read AAF"),
+            "bomb.aaf": ((self.dir / "bomb.aaf").read_bytes(), "AAF parser stopped"),
+        }
+        for name, (content, fragment) in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.write(name, content), mixdown=True)
+                self.assert_rejected(data, fragment, "s2")
 
 
 if __name__ == "__main__":
