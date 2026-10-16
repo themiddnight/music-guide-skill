@@ -4,7 +4,7 @@
 
 Verified on macOS arm64 on 2026-10-16 with Python 3.14.8, Claude Code plugin validation, and uv 0.12.21. Linux and Windows have not been run.
 
-**Automated behavior.** `PYTHONWARNINGS=error .venv/bin/python -m unittest discover -s tests -v` runs 236 tests in about 32 s with no warnings. Most CLI tests run the CLI in process through `tests/support.py`; real subprocess tests remain for interpreter isolation, the Python version and missing-dependency exit 3, installed copies, the AAF child process, startup cost, and one end-to-end smoke test per adapter group that must match the in-process output exactly.
+**Automated behavior.** `PYTHONWARNINGS=error .venv/bin/python -m unittest discover -s tests -v` runs 244 tests in about 34 s with no warnings. Most CLI tests run the CLI in process through `tests/support.py`; real subprocess tests remain for interpreter isolation, the Python version and missing-dependency exit 3, installed copies, the AAF child process, startup cost, and one end-to-end smoke test per adapter group that must match the in-process output exactly.
 
 **Audio measurements.** Loudness, loudness range and true peak were checked against ITU-R BS.1770-4 reference levels, EBU Tech 3341 cases 1, 3, 4 and 5 (-23.0 LUFS within 0.1) at 44.1, 48 and 96 kHz, and EBU Tech 3342 loudness-range cases. An independent ffmpeg `ebur128` run agreed within 0.05 LU on integrated loudness and range for every case. An independent reviewer matched integrated loudness against a brute-force BS.1770-4 implementation to about 1e-13 LU for arbitrary block sizes, and found true peak within -0.11 to +0.008 dB of a band-limited ideal for tones up to 0.45 fs.
 
