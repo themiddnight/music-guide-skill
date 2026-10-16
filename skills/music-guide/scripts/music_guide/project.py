@@ -9,8 +9,9 @@ from typing import Any, Iterable, Literal, Mapping, Sequence, get_args
 
 from .adapters.common import _finite_number, _media_basename
 from .adapters.listing import MAX_LISTED, MAX_NOTE_LISTING, limit_reached
-from .model import Confidence, Detail, Diagnostic, Evidence
+from .model import Confidence, Detail, Diagnostic, Evidence, NoteStarts, Observation
 from .notes import Note, summarize_notes
+from . import rhythm
 
 TrackKind = Literal["audio", "midi", "instrument", "group", "return", "master", "folder", "unknown"]
 TRACK_KINDS = frozenset(get_args(TrackKind))
@@ -20,7 +21,8 @@ TIME_DOMAINS: dict[str, str] = {"beats": "project_beats", "seconds": "project_se
 
 # Properties that repeat once per item of the file. A hostile file could list them without end, so each gets a cap.
 LISTED_PROPERTIES = {"project.track": "tracks", "project.plugin": "plugins", "project.marker": "markers",
-                     "project.media_reference": "media references", "project.note": "notes"}
+                     "project.media_reference": "media references", "project.note": "notes",
+                     "project.track_rhythm": "track rhythm summaries"}
 
 
 def _list_limit(property: str) -> int:
@@ -195,9 +197,98 @@ class ProjectFacts:
         scope = _track_scope(index)
         self._add("project.track_notes", summarize_notes(notes), "note_summary", locator, reason,
                   scope=scope, confidence=confidence)
+        source = self.evidence.observations[-1]
+        self.evidence.note_starts[(self.source_id, f"{self.scope}/{source.scope}")] = NoteStarts(
+            tuple(note.start_beat for note in notes), source.method, source.locator,
+            source.confidence, source.confidenceReason, source.scope, self.scope)
         if self.detail != "full":
             return
         for note in notes:
             self._add("project.note", {"pitch": note.pitch, "velocity": note.velocity, "startBeat": note.start_beat,
                                        "endBeat": note.end_beat, "channel": note.channel}, "note", locator,
                       "Stored note; no audible timing is inferred.", scope=scope, time_domain="project_beats")
+
+
+def _meter_points(staged: Evidence, source_id: str, scope: str
+                  ) -> tuple[rhythm.BarGrid | None, Observation | None, str | None]:
+    """Resolve the source's finished meter evidence after its adapter has emitted every fact."""
+    observations = [item for item in staged.observations if source_id in item.sourceIds and item.scope == scope]
+    maps = [item for item in observations if item.property.endswith(".meter_map")]
+    static = [item for item in observations if item.property == "meter"]
+    if maps:
+        if len(maps) > 1:
+            return None, None, "multiple meter maps are stored"
+        source = maps[0]
+        points: dict[float, rhythm.Meter] = {}
+        try:
+            for point in source.value:
+                beat = float(point["beat"])
+                signature = point.get("meter")
+                if signature is None:
+                    signature = f'{point["numerator"]}/{point["denominator"]}'
+                top, bottom = (int(part) for part in signature.split("/"))
+                meter = rhythm.Meter(top, bottom)
+                if not math.isfinite(beat) or top <= 0 or bottom <= 0:
+                    raise ValueError("invalid meter point")
+                if beat in points and points[beat] != meter:
+                    raise ValueError(f"conflicting meters at beat {beat:g}")
+                points[beat] = meter
+            return rhythm.BarGrid(tuple(sorted(points.items()))), source, None
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+            return None, source, f"its meter map cannot define a bar grid ({error})"
+    if len(static) != 1:
+        return None, None, "no unambiguous stored meter was found"
+    try:
+        top, bottom = (int(part) for part in static[0].value.split("/"))
+        meter = rhythm.Meter(top, bottom)
+        if top <= 0 or bottom <= 0:
+            raise ValueError("invalid meter")
+        return rhythm.BarGrid(((0.0, meter),)), static[0], None
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        return None, static[0], f"the stored meter cannot define a bar grid ({error})"
+
+
+def attach_track_rhythm(staged: Evidence, source_id: str) -> None:
+    """Add extracted note rhythm after parsing, when meter events may have arrived after notes."""
+    starts = [entry for (sid, _), entry in staged.note_starts.items() if sid == source_id]
+    if not starts:
+        return
+    confidence_order = {"low": 0, "medium": 1, "high": 2}
+    meters: dict[str, tuple[rhythm.BarGrid | None, Observation | None, str | None]] = {}
+    for entry in starts:
+        if entry.meter_scope not in meters:
+            meters[entry.meter_scope] = _meter_points(staged, source_id, entry.meter_scope)
+        grid, meter_source, problem = meters[entry.meter_scope]
+        positions = entry.starts_beats
+        per_bar = sync = None
+        if grid is not None:
+            try:
+                per_bar = grid.density(positions)
+                if per_bar is None:
+                    problem = "some note starts precede the first stored meter"
+                else:
+                    try:
+                        sync = rhythm.syncopation_on_grid(positions, grid)
+                    except ValueError as error:
+                        problem = f"the stored meter has no supported metric hierarchy ({error})"
+            except (ValueError, ZeroDivisionError) as error:
+                problem = f"the stored meter cannot place the notes ({error})"
+        if problem:
+            staged.diagnostics.append(Diagnostic(
+                "rhythm_meter_unknown", "info",
+                f"Partial bar rhythm for {entry.scope}: {problem}. Swing remains measurable from note starts.",
+                source_id))
+        value = {"onsetsPerBar": None if per_bar is None else round(per_bar, 3),
+                 "syncopation": sync, "swingRatio": rhythm.stored_swing_ratio(positions),
+                 "meterSource": meter_source.property if grid is not None and meter_source else None}
+        confidence = entry.confidence
+        if meter_source is not None and grid is not None and confidence_order[meter_source.confidence] < confidence_order[confidence]:
+            confidence = meter_source.confidence
+        facts = ProjectFacts(staged, source_id, entry.method, "summary", entry.meter_scope)
+        facts._add("project.track_rhythm", value, "rhythm", entry.locator,
+                   "Distinct starts per occupied bar and Longuet-Higgins and Lee syncopation on a sixteenth grid."
+                   f" {problem + '.' if problem else ''} {entry.grade_reason}"
+                   " Note timing describes project intent, not the rendered sound."
+                   + (f" The meter is {meter_source.confidence} confidence, so this is too."
+                      if meter_source and confidence != entry.confidence else ""),
+                   scope=entry.scope, confidence=confidence)

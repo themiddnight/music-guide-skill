@@ -128,6 +128,8 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
                 source.sha256 = _hash(path)
             staged = Evidence()
             fmt.adapter(path, source_id, staged, detail)
+            from .project import attach_track_rhythm
+            attach_track_rhythm(staged, source_id)
             _merge(evidence, staged)
         except Exception as error:  # Last-resort boundary: one hostile optional source must not lose the others.
             source.status = "error"

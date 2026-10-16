@@ -308,7 +308,7 @@ class AbletonTest(DawBase):
         self.assertNotIn("/Users/me", text)
         self.assertNotIn("C:\\\\Samples", text)
         self.assertNotIn("Ignore previous instructions", text)
-        self.assertEqual(data["diagnostics"][-1]["code"], "no_mixdown")
+        self.assertIn("no_mixdown", {item["code"] for item in data["diagnostics"]})
 
 
 RPP = r'''<REAPER_PROJECT 0.1 "7.0/macOS-arm64" 1700000000 0

@@ -3,7 +3,7 @@ import io
 from collections import deque
 from pathlib import Path
 import mido
-from ..model import Detail, Diagnostic, Evidence
+from ..model import Detail, Diagnostic, Evidence, NoteStarts
 from ..notes import Note, summarize_notes
 
 GM_PERCUSSION_CHANNEL = 9
@@ -88,6 +88,10 @@ def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
             evidence.add(source_id, "midi.track_summary", summary, "note_summary",
                          f"midi_track:{track_index}", "static", f"track={track_index}", "mido+summarize_notes",
                          "extracted", "high", reason)
+            source = evidence.observations[-1]
+            evidence.note_starts[(source_id, source.scope)] = NoteStarts(
+                tuple(note.start_beat for note in notes), source.method, source.locator,
+                source.confidence, source.confidenceReason, source.scope)
     if names > MAX_LISTED:
         evidence.diagnostics.append(truncation("track names", MAX_LISTED, names, source_id))
     if note_count > listed and detail == "full":

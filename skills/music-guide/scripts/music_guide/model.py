@@ -68,6 +68,19 @@ class Diagnostic:
     sourceId: str | None = None
 
 
+@dataclass(frozen=True)
+class NoteStarts:
+    """Transient stored note timing and the evidence grade that produced it."""
+
+    starts_beats: tuple[float, ...]
+    method: str
+    locator: str
+    confidence: Confidence
+    grade_reason: str
+    scope: str
+    meter_scope: str = "project"
+
+
 MAX_INTEGER_BITS = 1024
 
 
@@ -105,6 +118,7 @@ class Evidence:
     limitations: list[str] = field(default_factory=list)
     # Items listed so far per (source id, property), so a listing cap holds for a source however many writers it has.
     listed: Counter = field(default_factory=Counter, init=False, repr=False, compare=False)
+    note_starts: dict[tuple[str, str], NoteStarts] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def add(self, source_id: str, property: str, value: Any, unit: str,
             scope: str, time_domain: str, locator: str, method: str,

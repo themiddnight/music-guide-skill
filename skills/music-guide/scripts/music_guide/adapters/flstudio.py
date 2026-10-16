@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..model import Confidence, Detail, Diagnostic, Evidence
+from ..model import Confidence, Detail, Diagnostic, Evidence, NoteStarts
 from ..notes import Note, summarize_notes
 from ..project import MAX_TEMPO_BPM, ProjectFacts, TrackKind
 from .common import MAX_ZIP_BYTES, _read_bounded
@@ -389,6 +389,10 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
                      f"pattern {pattern.iid} notes (event 224)", METHOD, "extracted", "medium",
                      f"Aggregated from stored notes; beats are quarter notes inside the pattern, not arrangement "
                      f"time. {NOTES_CAVEAT}")
+        source = evidence.observations[-1]
+        evidence.note_starts[(source_id, source.scope)] = NoteStarts(
+            tuple(note.start_beat for note in pattern.notes), source.method, source.locator,
+            source.confidence, source.confidenceReason, source.scope)
         zero_length += pattern.zero_length_notes
         if detail == "full":
             for note in pattern.notes:
