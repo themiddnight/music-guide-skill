@@ -64,7 +64,7 @@ LMMS parses a file as XML first and falls back to `qUncompress`, so the adapter 
 
 ## Ardour sessions
 
-Sources: Ardour 5.12, 6.9 and 8.12 `session_state.cc`, `tempo.cc` and `libs/temporal/tempo.cc`, `location.cc`, `route.cc`, `playlist.cc`, `plugin_insert.cc` and `temporal/timeline.cc`, and the [Ardour session-file notes](https://git.ardour.org/ardour/manual/raw/branch/master/include/whats-in-a-session.html).
+Sources: Ardour 5.12, 6.9 and 8.12 `session_state.cc`, `tempo.cc` and `libs/temporal/tempo.cc`, `location.cc`, `route.cc`, `playlist.cc`, `plugin_insert.cc` and `temporal/timeline.cc`, read from the Ardour GitHub mirror, plus Ardour forum reports of the Ardour 4 and older `start=` layout.
 
 The adapter reads the session XML only (32 MiB limit, no DTD or entities). It never opens the session's audio, MIDI or plugin files. Three `TempoMap` layouts are read. Ardour 4 and older use flat `Tempo` and `Meter` children placed by `start="1|1|0"` (`beats-per-bar` names the meter numerator). Ardour 5 and 6 add whole-note `pulse` positions. Ardour 7 and later use `Tempos` and `Meters` lists with `quarters="beats:ticks"` positions and `npm`/`note-type` tempos. Inactive tempos are skipped. Tempo is converted to quarter notes per minute as `npm * 4 / note-type`.
 

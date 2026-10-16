@@ -112,7 +112,7 @@ class LogicPackageTest(ProjectCliCase):
         self.assertEqual(locators, {"AudioFiles", "UnusedAudioFiles", "SamplerInstrumentsFiles"})
         roles = {item["list"]: (item["role"], item["count"]) for item in self.values(data, "logic.media_list", "alternative:000")}
         self.assertEqual(roles["UnusedAudioFiles"], ("unused audio", 1))
-        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 1, "linksNotFollowed": 0, "truncated": False}] * 1)
+        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 1, "linksNotFollowed": 0, "truncated": False}])
         self.assertEqual(self.values(data, "logic.has_ara_plugins", "alternative:000"), [False])
         self.assertTrue(any(item["code"] == "project_data_not_read" for item in data["diagnostics"]))
         self.assertFalse(data["conflicts"])
