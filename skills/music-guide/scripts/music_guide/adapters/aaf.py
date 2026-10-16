@@ -17,7 +17,6 @@ from aaf2 import components, mobs
 
 from ..model import Detail, Diagnostic, Evidence
 from ..project import ProjectFacts, TrackKind
-from .common import _media_basename
 
 COMPOUND_FILE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 MAX_MOBS = 20_000
