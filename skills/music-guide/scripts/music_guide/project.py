@@ -34,10 +34,12 @@ class ProjectFacts:
     source_id: str
     method: str
     detail: Detail
+    # Scope of facts that are not about one track, e.g. "alternative:000" for a package that stores several arrangements.
+    scope: str = "project"
 
     def _add(self, property: str, value: Any, unit: str, locator: str, reason: str, *,
-             scope: str = "project", time_domain: str = "static", confidence: Confidence = "high") -> None:
-        self.evidence.add(self.source_id, property, value, unit, scope, time_domain, locator,
+             scope: str | None = None, time_domain: str = "static", confidence: Confidence = "high") -> None:
+        self.evidence.add(self.source_id, property, value, unit, self.scope if scope is None else scope, time_domain, locator,
                           self.method, "extracted", confidence, reason)
 
     def application(self, name: str, locator: str) -> None:
@@ -88,7 +90,7 @@ class ProjectFacts:
     def plugin(self, name: str, track: int | None, locator: str) -> None:
         self._add("project.plugin", {"name": name, "track": track}, "plugin", locator,
                   "Plugin named in the project; it was not loaded or run.",
-                  scope="project" if track is None else _track_scope(track))
+                  scope=None if track is None else _track_scope(track))
 
     def media_references(self, raw_paths: Iterable[str], locator: str) -> None:
         counts = Counter(name for name in map(_media_basename, raw_paths) if name)
@@ -98,7 +100,7 @@ class ProjectFacts:
 
     def clip_count(self, count: int, locator: str, track: int | None = None) -> None:
         self._add("project.clip_count", _count(count, "clip count"), "count", locator, "Count of stored clips.",
-                  scope="project" if track is None else _track_scope(track))
+                  scope=None if track is None else _track_scope(track))
 
     def track_notes(self, index: int, notes: Sequence[Note], locator: str,
                     reason: str = "Aggregated from stored notes; beats are quarter notes, not audible timing.",

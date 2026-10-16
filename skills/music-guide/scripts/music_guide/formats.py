@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import ableton, dawproject, midi, reaper, solna
+from .adapters import ableton, ardour, dawproject, lmms, logic, midi, reaper, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -58,9 +58,9 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "In Bitwig Studio use File > Export > DAWproject and pass the .dawproject file."),
     ProjectFormat("reason-song", "Reason song", (".reason",), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a mixdown and stems, and export the sequencer as a MIDI file."),
-    ProjectFormat("logic-package", "Logic Pro project", (".logicx",), "directory", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("logic-package", "Logic Pro project", (".logicx",), "directory", MAX_ZIP_BYTES, _any, logic.logic,
                   "Export a mixdown and stems, and the MIDI regions as a MIDI file."),
-    ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, logic.garageband,
                   "Export the song to disk as WAV or AIFF. GarageBand cannot export MIDI; Logic Pro can open the project to do so."),
     ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown."),
@@ -74,9 +74,9 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Export a WAV mixdown and stems, and use File > Export > MIDI file."),
     ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
                   "Export a DAWproject (Studio One 6.5 or later), or a mixdown, stems and MIDI."),
-    ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", MAX_ZIP_BYTES, _signature(b"<", text=True), None,
+    ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", ardour.MAX_ARDOUR_BYTES, _signature(b"<?xml", b"<Session", text=True), ardour.ardour,
                   "Export a mixdown and stems with Session > Export, and MIDI regions as MIDI files."),
-    ProjectFormat("lmms-project", "LMMS project", (".mmp", ".mmpz"), "file", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("lmms-project", "LMMS project", (".mmp", ".mmpz"), "file", lmms.MAX_LMMS_BYTES, lmms.detect, lmms.lmms,
                   "Export a WAV mixdown with File > Export and the tracks with File > Export MIDI."),
     ProjectFormat("aaf", "AAF interchange file", (".aaf",), "file", MAX_ZIP_BYTES,
                   _signature(COMPOUND_FILE, b"<", text=True), None,

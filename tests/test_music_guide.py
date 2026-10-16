@@ -165,8 +165,9 @@ class MusicGuideTest(unittest.TestCase):
         native = self.dir / "song.logicx"
         native.mkdir()
         data = self.evidence("--project", native)
-        self.assertEqual(data["sources"][1]["status"], "unsupported")
+        self.assertEqual(data["sources"][1]["status"], "error")
         self.assertIsNone(data["sources"][1]["sha256"])
+        self.assertTrue(any("Alternatives/NNN/MetaData.plist" in item["message"] for item in data["diagnostics"]))
         self.assertEqual(self.evidence("--project", self.dir / "missing.logicx")["sources"][1]["status"], "error")
         target = self.dir / "outside" / "music-guide"
         install = subprocess.run([sys.executable, str(ROOT / "install.py"), "--dest", str(target)],
@@ -510,9 +511,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.npr", b"RIFF", "cubase-project", "DAWproject"),
             ("song.flp", b"FLhd\x06\x00", "fl-studio-flp", "MIDI file"),
             ("song.song", zipped, "studio-one-song", "DAWproject"),
-            ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),
-            ("song.mmp", b"<lmms-project/>", "lmms-project", "Export MIDI"),
-            ("song.mmpz", b"\x00\x00\x01\x00x", "lmms-project", "Export MIDI"),
             ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
             ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
@@ -530,12 +528,6 @@ class MusicGuideTest(unittest.TestCase):
                 warning = next(item for item in data["diagnostics"] if item["code"] == "unsupported_project")
                 self.assertEqual(warning["severity"], "warning")
                 self.assertIn(hint, warning["message"])
-        for name, adapter in (("song.logicx", "logic-package"), ("song.band", "garageband-package")):
-            with self.subTest(name=name):
-                (self.dir / name).mkdir()
-                (self.dir / name / "projectData").write_bytes(b"x")
-                source = self.evidence("--project", self.dir / name, mixdown=False)["sources"][0]
-                self.assertEqual((source["adapter"], source["status"], source["sha256"]), (adapter, "unsupported", None))
         unknown = self.dir / "song.xyz"
         unknown.write_bytes(b"x")
         data = self.evidence("--project", unknown, mixdown=False)
