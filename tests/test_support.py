@@ -1,6 +1,9 @@
 """The in-process CLI runner must fail the way a child interpreter would, or the suite stops proving anything."""
 from __future__ import annotations
 
+import contextlib
+import importlib.machinery
+import io
 import os
 import sys
 import tempfile
@@ -42,6 +45,20 @@ class InProcessRunnerTest(unittest.TestCase):
         result = run_cli(cwd=self.dir)
         self.assertEqual((result.returncode, result.stdout), (2, ""))
         self.assertIn("usage: analyze.py", result.stderr)
+
+    def test_cli_program_name_is_independent_of_host_main_module_and_argv(self):
+        host = sys.modules["__main__"]
+        before = (sys.argv, host.__spec__)
+        errors = io.StringIO()
+        spec = importlib.machinery.ModuleSpec("foreign.runner", loader=None)
+        with mock.patch.object(host, "__spec__", spec), mock.patch.object(sys, "argv", ["host-command"]):
+            with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as stopped:
+                cli.main([])
+            self.assertIs(host.__spec__, spec)
+            self.assertEqual(sys.argv, ["host-command"])
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertTrue(errors.getvalue().startswith("usage: analyze.py "), errors.getvalue())
+        self.assertEqual((sys.argv, host.__spec__), before)
 
     def test_state_is_restored_after_every_run(self):
         before = (list(sys.argv), os.getcwd(), sys.stderr, list(warnings.filters))

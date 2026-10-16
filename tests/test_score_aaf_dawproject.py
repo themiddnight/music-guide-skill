@@ -184,6 +184,29 @@ class MusicXmlTest(ScoreCase):
         self.assertEqual(self.values(data, "tempo"), [])
         self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0, "bpm": 100}, {"beat": 4, "bpm": 90}]])
 
+    def test_simultaneous_part_meters_preserve_both_without_a_global_claim(self):
+        def measure(numerator):
+            return (f'<measure number="1"><attributes><divisions>1</divisions><time><beats>{numerator}</beats>'
+                    '<beat-type>4</beat-type></time></attributes>' + note("C", 4, 1) + '</measure>')
+        data = self.evidence("--project", self.write("polymeter.musicxml", partwise(measure(3), measure(4))))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertEqual(self.values(data, "musicxml.meter_map"),
+                         [[{"beat": 0, "meter": "3/4"}, {"beat": 0, "meter": "4/4"}]])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "score_meter_disagreement")
+        self.assertEqual((warning["severity"], warning["sourceId"]), ("warning", "s1"))
+        self.assertIn("beat 0", warning["message"])
+
+    def test_simultaneous_part_tempos_preserve_both_without_claiming_agreement(self):
+        def measure(bpm):
+            return ('<measure number="1"><attributes><divisions>1</divisions></attributes>'
+                    f'<sound tempo="{bpm}"/>' + note("C", 4, 1) + '</measure>')
+        data = self.evidence("--project", self.write("tempos.musicxml", partwise(measure(96), measure(120))))
+        self.assertEqual(self.values(data, "tempo"), [])
+        self.assertEqual(self.values(data, "project.tempo_map"),
+                         [[{"beat": 0, "bpm": 96}, {"beat": 0, "bpm": 120}]])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "score_tempo_disagreement")
+        self.assertNotIn("first was kept", warning["message"])
+
     def test_tempo_conflicts_with_declaration(self):
         path = self.write("etude.musicxml", partwise())
         declarations = self.write("declarations.json", json.dumps(
@@ -356,6 +379,15 @@ class MuseScoreTest(ScoreCase):
                 tuplet = [item["value"] for item in written if item["value"]["pitch"] == 60][0]
                 self.assertAlmostEqual(tuplet["startBeat"], 3 + 1 / 3)
                 self.assertAlmostEqual(tuplet["endBeat"], 3 + 2 / 3)
+
+    def test_simultaneous_staff_meters_preserve_both_without_a_global_claim(self):
+        start, second_staff = self.SCORE.split('<Staff id="2"><Measure>', 1)
+        second_staff = second_staff.replace('<sigN>3</sigN>', '<sigN>4</sigN>', 1)
+        data = self.evidence("--project", self.package(score=start + '<Staff id="2"><Measure>' + second_staff))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertEqual(self.values(data, "musescore.meter_map"),
+                         [[{"beat": 0, "meter": "3/4"}, {"beat": 0, "meter": "4/4"}]])
+        self.assertTrue(any(item["code"] == "score_meter_disagreement" for item in data["diagnostics"]))
 
     def test_single_unnamed_mscx_is_found_without_container(self):
         path = self.zip("plain.mscz", {"score.mscx": self.SCORE})

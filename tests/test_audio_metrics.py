@@ -223,6 +223,64 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertGreater(sum(profile[name] for name in ("E", "F", "A", "B", "C")), 0.75)
         self.assertTrue(all(profile[name] < 0.05 for name in ("C#", "D", "D#", "F#", "G", "G#", "A#")))
 
+    def test_key_and_pitch_profile_survive_antiphase_stereo(self):
+        chord = note(60, 4) + note(64, 4) + note(67, 4)
+        control = self.analyze(stereo(chord))
+        inverted = self.analyze(np.stack([chord, -chord], axis=1))
+        for prop in ("audio.pitch_class_profile", "audio.key_estimate"):
+            self.assertIn(prop, list(inverted["facts"]))
+            self.assertEqual(self.value(inverted, prop), self.value(control, prop))
+        candidate = self.value(inverted, "audio.key_estimate")["candidates"][0]
+        self.assertEqual((candidate["tonic"], candidate["mode"]), ("C", "major"))
+        self.assertNotIn("No key estimate", " ".join(item["message"] for item in inverted["diagnostics"]))
+
+    def test_periodicity_survives_antiphase_stereo(self):
+        burst = np.random.default_rng(3).standard_normal(600) * np.exp(-np.arange(600) / 80) * 0.5
+        clicks = np.zeros(10 * RATE)
+        for start in range(0, len(clicks) - 600, RATE // 2):
+            clicks[start:start + 600] += burst
+        control = self.analyze(stereo(clicks))
+        inverted = self.analyze(np.stack([clicks, -clicks], axis=1))
+        self.assertIn("audio.tempo_estimate", list(inverted["facts"]))
+        self.assertEqual(self.value(inverted, "audio.tempo_estimate"), self.value(control, "audio.tempo_estimate"))
+        self.assertTrue(any(abs(item["bpm"] - 120) < 1.5
+                            for item in self.value(inverted, "audio.tempo_estimate")["candidates"]))
+
+    def test_pitch_profile_preserves_independent_channels_under_each_polarity_flip(self):
+        left, right = note(60, 3), note(66, 3)
+        control = self.analyze(np.stack([left, right], axis=1))
+        expected = self.value(control, "audio.pitch_class_profile")
+        self.assertGreater(expected["C"], 0.4)
+        self.assertGreater(expected["F#"], 0.4)
+        for signs in ((-1, 1), (1, -1), (-1, -1)):
+            with self.subTest(signs=signs):
+                flipped = self.analyze(np.stack([left * signs[0], right * signs[1]], axis=1))
+                self.assertEqual(self.value(flipped, "audio.pitch_class_profile"), expected)
+                self.assertEqual(self.value(flipped, "audio.key_estimate"), self.value(control, "audio.key_estimate"))
+
+    def test_music_features_are_invariant_to_decimator_chunk_boundaries(self):
+        from music_guide.analysis import MusicFeatures
+        rate = 192000
+        n = np.arange(rate * 9)
+        left = 0.2 * np.sin(2 * np.pi * 261.625565 * n / rate)
+        right = 0.2 * np.sin(2 * np.pi * 369.994423 * n / rate)
+        envelope = (n % (rate // 2) < rate // 10).astype(float)
+        samples = np.stack([left * envelope, right * envelope], axis=1)
+        whole = MusicFeatures(rate)
+        whole.feed(samples)
+        whole.finish()
+        for chunk in (113, 65536):
+            with self.subTest(chunk=chunk):
+                streamed = MusicFeatures(rate)
+                for start in range(0, len(samples), chunk):
+                    streamed.feed(samples[start:start + chunk])
+                streamed.finish()
+                self.assertEqual(streamed.seconds, whole.seconds)
+                self.assertEqual(streamed.pitch_class_profile(), whole.pitch_class_profile())
+                self.assertEqual(streamed.key(), whole.key())
+                self.assertEqual(streamed.tempo(), whole.tempo())
+                self.assertIsNotNone(streamed.tempo())
+
     def test_decodes_beyond_wav_and_flags_lossy_codecs(self):
         signal = stereo(tone(-20, 5))
         formats = [("mix.flac", "FLAC", "PCM_24", False), ("mix.aiff", "AIFF", "PCM_16", False),
