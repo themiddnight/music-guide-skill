@@ -596,5 +596,42 @@ class CubaseTest(ProjectCliTest):
                             for item in data["diagnostics"]))
 
 
+    def test_non_finite_metadata_floats_are_rejected_and_keep_the_application(self):
+        for name, kwargs in {"nan-tempo": dict(tempo=float("nan")), "inf-rate": dict(rate=float("inf")),
+                             "neg-inf-tempo": dict(tempo=float("-inf"))}.items():
+            with self.subTest(name=name):
+                result = self.run_cli("--project", self.write(f"{name}.cpr", meta=metadata(**kwargs)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("NaN", result.stdout)
+                self.assertNotIn("Infinity", result.stdout)
+                data = json.loads(result.stdout)
+                self.assertEqual(self.values(data, "project.application"), ["Cubase 12.0.50"])
+                self.assertEqual(self.values(data, "tempo") + self.values(data, "project.sample_rate"), [])
+                self.assertTrue(any(item["code"] == "cubase_deep_parse_failed" and "finite" in item["message"]
+                                    for item in data["diagnostics"]))
+
+    def test_implausible_tempo_and_sample_rate_are_reported_not_mapped(self):
+        for name, kwargs, fragment in (("tempo", dict(tempo=1e12), "MusicalTempo"), ("fast", dict(tempo=5000.0), "MusicalTempo"),
+                                       ("rate", dict(rate=1e12), "AudioSampleRate"), ("slow", dict(rate=3.0), "AudioSampleRate")):
+            with self.subTest(name=name):
+                data = self.project(self.write(f"{name}.cpr", meta=metadata(**kwargs)))
+                self.assertEqual(self.values(data, "tempo") if "tempo" in kwargs else self.values(data, "project.sample_rate"), [])
+                self.assertTrue(any(item["code"] == "cubase_value_out_of_range" and fragment in item["message"]
+                                    for item in data["diagnostics"]), data["diagnostics"])
+                self.assertEqual(len(self.values(data, "cubase.media_attribute")), 4)
+
+    def test_media_name_scan_counts_every_examined_match(self):
+        junk = b"x.wav\0\xef\xbb\xbf" * (cubase.MAX_MATCHES + 100)
+        valid = cm("Late.wav", bom=True)
+        data = self.project(self.write(arrange=arrangement(()) + junk + valid))
+        self.assertNotIn("Late.wav", [item["value"]["basename"] for item in self.items(data, "project.media_reference")])
+        self.assertTrue(any(item["code"] == "cubase_scan_limit" for item in data["diagnostics"]), data["diagnostics"])
+
+    def test_plugin_facts_warn_that_built_in_modules_are_included(self):
+        data = self.project(self.write())
+        for item in self.items(data, "project.plugin"):
+            self.assertIn("built-in", item["confidenceReason"])
+
+
 if __name__ == "__main__":
     unittest.main()

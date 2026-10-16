@@ -11,6 +11,7 @@ low confidence. This module is an independent implementation.
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ MAX_RECORDS = 512
 MAX_NESTING = 4
 MAX_CLASS_NAME = 64
 MAX_TEXT = 1000
+TEMPO_RANGE = (1.0, 1000.0)
+SAMPLE_RATE_RANGE = (1000.0, 768_000.0)
 BOM = b"\xef\xbb\xbf"
 NUL_BOM = b"\0" + BOM
 STRING_TYPE = b"\x00\x08"
@@ -47,6 +50,8 @@ TRACK_CLASS_KINDS: dict[str, TrackKind] = {"MAudioTrackEvent": "audio", "MMidiTr
 VALUE_FIELDS = ("Long", "Float", "String", "Object")
 PATTERN_CAVEAT = ("Found by matching a byte pattern in the undocumented object stream, not by decoding it, so "
                   "entries can be missing or extra; checked against one Cubase 11 project only.")
+BUILT_IN_CAVEAT = ("The list includes Cubase's built-in channel modules (for example Panner, EQ, Input Filter), "
+                   "not only third-party plugins.")
 GUIDANCE = "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown, for complete data."
 
 
@@ -177,6 +182,8 @@ def _record(buf: bytes, pos: int, end: int, depth: int = 0) -> tuple[dict[str, o
             value, pos = struct.unpack_from(">q", buf, pos)[0], pos + 8
         elif kind == 4 and end - pos >= 8:
             value, pos = struct.unpack_from(">d", buf, pos)[0], pos + 8
+            if not math.isfinite(value):
+                raise ValueError(f"Cubase attribute field {name!r} holds a non-finite number; the record is corrupt")
         elif kind == 8:
             value, pos = _string(buf, pos, end)
         elif kind == 2:
@@ -288,11 +295,13 @@ def _plugin_names(buf: bytes) -> list[str]:
     return names
 
 
-def _media_names(buf: bytes) -> list[str]:
-    names = []
+def _media_names(buf: bytes) -> tuple[list[str], bool]:
+    """Names found next to media file extensions, and whether the scan stopped at MAX_MATCHES examined matches."""
+    names, examined = [], 0
     for match in MEDIA_NAME_END.finditer(buf):
-        if len(names) >= MAX_MATCHES:
-            break
+        if examined >= MAX_MATCHES:
+            return names, True
+        examined += 1
         end = match.end()
         for start in range(match.start(), max(match.start() - MAX_STRING_WALK, 4), -1):
             if struct.unpack_from(">I", buf, start - 4)[0] == end - start:
@@ -300,7 +309,7 @@ def _media_names(buf: bytes) -> list[str]:
                 if _printable(text):
                     names.append(text)
                 break
-    return names
+    return names, False
 
 
 def cubase(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
@@ -354,12 +363,24 @@ def _emit_metadata(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
         evidence.add(source_id, "cubase.media_attribute", item, "attribute", "project", "static",
                      "Metadata chunk, StMedia attribute", METHOD, "extracted", "high",
                      "Stored media attribute record, parsed from its length-prefixed fields.")
-    rate = by_id.get("AudioSampleRate")
-    if isinstance(rate, (int, float)) and rate > 0:
-        medium.sample_rate(int(rate) if float(rate).is_integer() else rate, "Metadata AudioSampleRate")
-    tempo = by_id.get("MusicalTempo")
-    if isinstance(tempo, (int, float)) and tempo > 0:
-        low.tempo(round(float(tempo), 4), "Metadata MusicalTempo")
+    def plausible(name: str, bounds: tuple[float, float]) -> float | None:
+        value = by_id.get(name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+            return None
+        number = float(value)
+        if bounds[0] <= number <= bounds[1]:
+            return number
+        evidence.diagnostics.append(Diagnostic("cubase_value_out_of_range", "warning",
+            f"Metadata {name} holds {number:g}, outside {bounds[0]:g}-{bounds[1]:g}; it was kept as a media "
+            f"attribute but not reported as a project fact.", source_id))
+        return None
+
+    rate = plausible("AudioSampleRate", SAMPLE_RATE_RANGE)
+    if rate is not None:
+        medium.sample_rate(int(rate) if rate.is_integer() else rate, "Metadata AudioSampleRate")
+    tempo = plausible("MusicalTempo", TEMPO_RANGE)
+    if tempo is not None:
+        low.tempo(round(tempo, 4), "Metadata MusicalTempo")
     signature = by_id.get("MusicalSignature")
     if isinstance(signature, dict):
         numerator, denominator = signature.get("Numerator"), signature.get("Denominator")
@@ -374,6 +395,7 @@ def _emit_patterns(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
     media: list[str] = []
     tracks: list[tuple[str, str | None]] = []
     track_classes: set[str] = set()
+    scan_truncated = False
     for name, _, arch in roots:
         if name == "Version" or name == "Metadata":
             continue
@@ -384,7 +406,13 @@ def _emit_patterns(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
             table = _scan_classes(buf)
             track_classes |= {node.name for node in table.values() if node.name.endswith("TrackEvent")}
             tracks += _tracks(buf, table)
-            media += _media_names(buf)
+            names, truncated = _media_names(buf)
+            media += names
+            scan_truncated |= truncated
+    if scan_truncated:
+        evidence.diagnostics.append(Diagnostic("cubase_scan_limit", "warning",
+            f"The media file name scan stopped after {MAX_MATCHES} candidate matches, so later media references "
+            f"are not reported.", source_id))
     if track_classes:
         evidence.add(source_id, "cubase.track_classes", sorted(track_classes), "class", "project", "static",
                      "Arrangement chunk class headers", METHOD, "extracted", "medium",
@@ -401,8 +429,10 @@ def _emit_patterns(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
         evidence.add(source_id, "cubase.track_class", track_class, "class", f"project_track:{index}", "static",
                      f"Arrangement chunk track header {index}", METHOD, "inferred", "low",
                      "Class resolved from the reference stored just before the track header. " + PATTERN_CAVEAT)
+    plugin_facts = GradedFacts(evidence, source_id, METHOD, facts.detail, grade="low",
+                               caveat=PATTERN_CAVEAT + " " + BUILT_IN_CAVEAT)
     for plugin in sorted(plugin_counts):
-        low.plugin(plugin, None, "Plugin Name attribute")
+        plugin_facts.plugin(plugin, None, "Plugin Name attribute")
         evidence.add(source_id, "cubase.plugin_mentions", {"name": plugin, "count": plugin_counts[plugin]},
                      "mentions", "project", "static", "Plugin Name attribute", METHOD, "inferred", "low",
                      "Number of times the name is stored; one plugin instance can be stored more than once and "
