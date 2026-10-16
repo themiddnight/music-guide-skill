@@ -515,9 +515,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.mmpz", b"\x00\x00\x01\x00x", "lmms-project", "Export MIDI"),
             ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
-            ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
-            ("score.mxl", zipped, "musicxml", "MIDI"),
-            ("score.mscz", zipped, "musescore-mscz", "MIDI"),
         ]
         for name, content, adapter, hint in inventory:
             with self.subTest(name=name):

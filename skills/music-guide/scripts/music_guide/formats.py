@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import dawproject, midi, solna
+from .adapters import dawproject, midi, musescore, musicxml, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -83,10 +83,10 @@ FORMATS: tuple[ProjectFormat, ...] = (
     ProjectFormat("omf", "OMF interchange file", (".omf",), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a mixdown and stems, or a DAWproject or MIDI file if the source application supports it."),
     ProjectFormat("musicxml", "MusicXML score", (".musicxml", ".mxl"), "file", MAX_ZIP_BYTES,
-                  _signature(ZIP, b"<", text=True), None,
-                  "Export the score as a MIDI file, and as audio for the rendered sound."),
-    ProjectFormat("musescore-mscz", "MuseScore score", (".mscz",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
-                  "Export the score as a MIDI file, and as audio for the rendered sound."),
+                  _signature(ZIP, b"<", text=True),
+                  musicxml.musicxml, "Export the score as a MIDI file, and as audio for the rendered sound."),
+    ProjectFormat("musescore-mscz", "MuseScore score", (".mscz",), "file", MAX_ZIP_BYTES, _signature(ZIP),
+                  musescore.musescore, "Export the score as a MIDI file, and as audio for the rendered sound."),
 )
 BY_NAME = {item.name: item for item in FORMATS}
 assert len(BY_NAME) == len(FORMATS), "format names must be unique"
