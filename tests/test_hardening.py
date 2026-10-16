@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import struct
+import zipfile
 import subprocess
 import sys
 import tempfile
@@ -368,6 +369,80 @@ class MessageTest(CliCase):
         dev = (ROOT / "requirements-dev.txt").read_text()
         self.assertIn("-r skills/music-guide/requirements.txt", dev)
         self.assertIn("jsonschema", dev)
+
+
+class ZipLimitTest(CliCase):
+    def test_embedded_audio_does_not_count_against_the_read_member(self):
+        from music_guide.adapters.common import _read_zip_member
+        many = self.dir / "many.zip"
+        with zipfile.ZipFile(many, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("project.xml", "<Project/>")
+            for index in range(2000):
+                archive.writestr(f"audio/{index}.wav", b"RIFF" + bytes(64))
+        self.assertEqual(_read_zip_member(many, "project.xml", 1024), b"<Project/>")
+        big = self.dir / "big.zip"
+        with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("project.xml", "<Project/>")
+            with archive.open("audio/take.wav", "w", force_zip64=True) as stream:
+                for _ in range(70):
+                    stream.write(bytes(1024 * 1024))
+        self.assertLess(big.stat().st_size, 1024 * 1024)
+        self.assertEqual(_read_zip_member(big, "project.xml", 1024), b"<Project/>")
+
+    def test_dawproject_with_many_embedded_samples_is_parsed(self):
+        project = self.dir / "samples.dawproject"
+        with zipfile.ZipFile(project, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("project.xml", '<Project version="1"><Application name="Bitwig Studio" version="5.2"/>'
+                             '<Transport><Tempo value="120" unit="bpm"/></Transport><Structure/></Project>')
+            for index in range(600):
+                archive.writestr(f"audio/sample-{index}.wav", b"RIFF" + bytes(32))
+        data = self.evidence("--dawproject", project)
+        self.assertEqual(data["sources"][-1]["status"], "ok")
+        self.assertEqual([item["value"] for item in data["observations"] if item["property"] == "tempo"], [120])
+
+    def test_entry_count_cap_still_applies(self):
+        from music_guide.adapters.common import MAX_ZIP_ENTRIES, _read_zip_member
+        crowded = self.dir / "crowded.zip"
+        with zipfile.ZipFile(crowded, "w") as archive:
+            for index in range(MAX_ZIP_ENTRIES + 1):
+                archive.writestr(f"f{index}", "")
+            archive.writestr("project.xml", "<a/>")
+        with self.assertRaisesRegex(ValueError, "entries"):
+            _read_zip_member(crowded, "project.xml", 1024)
+
+    def test_oversized_central_directory_is_refused_before_it_is_parsed(self):
+        from music_guide.adapters.common import _read_zip_member
+        record = b"PK\x01\x02" + struct.pack("<HHHHHHIIIHHHHHII", 20, 20, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0) + b"a"
+        directory = record * 400000
+        spoof = self.dir / "spoof.zip"
+        spoof.write_bytes(directory + b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, len(directory), 0, 0))
+        with mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("parsed the directory")):
+            with self.assertRaisesRegex(ValueError, "central directory"):
+                _read_zip_member(spoof, "a", 1024)
+
+    def test_zip64_end_record_is_read_for_the_directory_size(self):
+        import io
+        from music_guide.adapters.common import MAX_CENTRAL_DIRECTORY_BYTES, _central_directory_size, _read_zip_member
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("project.xml", "<a/>")
+        plain = buffer.getvalue()
+        directory_offset = struct.unpack_from("<I", plain, len(plain) - 6)[0]
+        directory = plain[directory_offset:-22]
+
+        def zip64(size: int) -> Path:
+            record_offset = directory_offset + len(directory)
+            record = b"PK\x06\x06" + struct.pack("<QHHIIQQQQ", 44, 45, 45, 0, 0, 1, 1, size, directory_offset)
+            locator = b"PK\x06\x07" + struct.pack("<IQI", 0, record_offset, 1)
+            end = b"PK\x05\x06" + struct.pack("<HHHHIIH", 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+            path = self.dir / f"z64-{size}.zip"
+            path.write_bytes(plain[:directory_offset] + directory + record + locator + end)
+            return path
+        honest = zip64(len(directory))
+        self.assertEqual(_central_directory_size(honest), len(directory))
+        self.assertEqual(_read_zip_member(honest, "project.xml", 1024), b"<a/>")
+        with self.assertRaisesRegex(ValueError, "central directory"):
+            _read_zip_member(zip64(MAX_CENTRAL_DIRECTORY_BYTES + 1), "project.xml", 1024)
 
 
 if __name__ == "__main__":

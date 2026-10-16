@@ -439,7 +439,7 @@ class MusicGuideTest(unittest.TestCase):
                 _gunzip_bounded(raw, 1024 * 1024)
         archive_path = self.dir / "many.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
-            for index in range(300):
+            for index in range(20000):
                 archive.writestr(f"f{index}.txt", "x")
         with self.assertRaises(ValueError):
             _read_zip_member(archive_path, "f1.txt", 1024)

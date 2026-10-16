@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import struct
 import zipfile
 import zlib
 from pathlib import Path
@@ -15,7 +16,9 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 # mido holds every message as an object (about 130 bytes of RAM per file byte), so the bound is tight.
 MAX_MIDI_BYTES = 4 * 1024 * 1024
 MAX_XML_BYTES = 8 * 1024 * 1024
-MAX_ZIP_ENTRIES = 256
+# Embedded audio is common in project exports, so the entry cap is generous. Only the member that is read is bounded.
+MAX_ZIP_ENTRIES = 16384
+MAX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_AUDIO_BYTES = 4 * 1024 * 1024 * 1024
 
@@ -76,12 +79,39 @@ def _gunzip_bounded(raw: bytes, limit: int) -> bytes:
     return data
 
 
+def _central_directory_size(path: Path) -> int | None:
+    """Size of the central directory from the end record. zipfile builds one object per 46 bytes of it, so this
+    is the number to bound before the archive is opened; the entry count in the same record can be spoofed."""
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        size = stream.tell()
+        stream.seek(max(0, size - 65557))
+        tail = stream.read()
+        index = tail.rfind(b"PK\x05\x06")
+        if index < 0 or len(tail) < index + 22:
+            return None
+        directory_size = struct.unpack_from("<I", tail, index + 12)[0]
+        if directory_size != 0xFFFFFFFF or index < 20 or tail[index - 20:index - 16] != b"PK\x06\x07":
+            return directory_size
+        stream.seek(struct.unpack_from("<Q", tail, index - 12)[0])
+        record = stream.read(48)
+    if len(record) < 48 or record[:4] != b"PK\x06\x06":
+        return None
+    return struct.unpack_from("<Q", record, 40)[0]
+
+
 def _read_zip_member(path: Path, member: str, limit: int, *, max_entries: int = MAX_ZIP_ENTRIES,
-                     max_total: int = MAX_ZIP_BYTES) -> bytes:
+                     max_total: int | None = None) -> bytes:
+    """Reads one bounded member. Only that member's size is limited; `max_total` optionally bounds all members."""
+    directory_size = _central_directory_size(path)
+    if directory_size is not None and directory_size > MAX_CENTRAL_DIRECTORY_BYTES:
+        raise ValueError(f"archive central directory is {directory_size} bytes, more than the {MAX_CENTRAL_DIRECTORY_BYTES} limit")
     try:
         with zipfile.ZipFile(path) as archive:
             entries = archive.infolist()
-            if len(entries) > max_entries or sum(item.file_size for item in entries) > max_total:
+            if len(entries) > max_entries:
+                raise ValueError(f"archive holds {len(entries)} entries, more than the {max_entries} limit")
+            if max_total is not None and sum(item.file_size for item in entries) > max_total:
                 raise ValueError("archive exceeds metadata safety limits")
             matches = [item for item in entries if item.filename == member]
             if len(matches) != 1 or matches[0].file_size > limit:
