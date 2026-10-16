@@ -16,6 +16,7 @@ for it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -54,6 +55,7 @@ class Measurement(NamedTuple):
     peak_mb: float
     stderr: str = ""
     timed_out: bool = False
+    stdout: str = ""
 
 
 CASES = (Case("4 minute stereo 44.1 kHz", 240.0, 44100, 2, 15.0, 400.0),
@@ -132,8 +134,10 @@ def measure(command: Sequence[str], *, timeout: float | None = DEFAULT_TIMEOUT) 
         child.returncode = os.waitstatus_to_exitcode(status)
         err.seek(0)
         stderr = err.read().decode(errors="replace")
+        out.seek(0)
+        stdout = out.read().decode(errors="replace")
     peak_bytes = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
-    return Measurement(child.returncode, seconds, peak_bytes / BYTES_PER_MB, stderr, timed_out)
+    return Measurement(child.returncode, seconds, peak_bytes / BYTES_PER_MB, stderr, timed_out, stdout)
 
 
 def verdict(case: Case, result: Measurement) -> str:
@@ -147,6 +151,20 @@ def verdict(case: Case, result: Measurement) -> str:
     if result.peak_mb > case.max_mb:
         over.append(f"memory {result.peak_mb:.0f} MB over {case.max_mb:g} MB")
     return "over budget: " + ", ".join(over) if over else "within budget"
+
+
+def report_errors(output: str) -> list[str]:
+    """Verify that a timed CLI run actually produced all supported analyzer families."""
+    try:
+        report = json.loads(output)
+        properties = {item["property"] for item in report["observations"]}
+        errors = [item["message"] for item in report["diagnostics"] if item["code"] == "estimate_failed"]
+        required = {"audio.duration", "audio.integrated_loudness", "audio.beat_grid", "audio.chord_timeline",
+                    "audio.rhythm", "audio.structure", "audio.energy_timeline", "audio.mood_estimate", "audio.melody"}
+        errors.extend(f"missing {name}" for name in sorted(required - properties))
+        return errors
+    except (ValueError, TypeError, KeyError) as error:
+        return [f"invalid evidence output: {error}"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -174,7 +192,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                   f"{verdict(case, result)} (budget {budget}, detail {args.detail})")
             if result.returncode != 0:
                 print(result.stderr.strip()[-2000:], file=sys.stderr)
-            failures += verdict(case, result) != "within budget"
+            errors = report_errors(result.stdout) if result.returncode == 0 else []
+            for error in errors:
+                print(f"analysis error: {error}", file=sys.stderr)
+            failures += verdict(case, result) != "within budget" or bool(errors)
     return 1 if failures else 0
 
 

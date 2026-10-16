@@ -66,6 +66,22 @@ class LoudnessMeter:
             self.pending += float(cumulative[-1])
         self.position = end
 
+    def segment_means(self) -> np.ndarray:
+        """K-weighted channel-summed mean squares on the recorder's 100 ms grid.
+
+        Include the last partial segment using its actual sample count, so short
+        clips and the final feature row keep their measured energy.
+        """
+        energy = np.concatenate(self.chunks) if self.chunks else np.zeros(0)
+        bounds = np.arange(len(energy) + 1) * self.rate // 10
+        lengths = np.diff(bounds)
+        if self.position > bounds[-1]:
+            energy = np.append(energy, self.pending)
+            lengths = np.append(lengths, self.position - bounds[-1])
+        means = np.divide(energy, lengths, out=np.zeros_like(energy), where=lengths > 0)
+        means.flags.writeable = False
+        return means
+
     def windows(self, segments: int) -> tuple[np.ndarray, np.ndarray]:
         """Mean square and start time in seconds of every complete window of n segments."""
         energy = np.concatenate(self.chunks) if self.chunks else np.zeros(0)

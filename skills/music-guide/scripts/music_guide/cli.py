@@ -90,7 +90,9 @@ def _inventory(path: Path, fmt: ProjectFormat | None, source: Source, evidence: 
 
 
 def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None,
-          detail: Detail = "summary") -> Evidence:
+          detail: Detail = "summary", analysis_backend: str = "builtin") -> Evidence:
+    if analysis_backend != "builtin":
+        raise ValueError(f"unknown analysis backend: {analysis_backend}")
     evidence = Evidence(limitations=[
         "Loudness and true peak follow ITU-R BS.1770-4 with every channel weighted 1.0; no surround channel map is read.",
         "Tempo and key estimates from audio are inferred, low-confidence candidates, not facts.",
@@ -112,7 +114,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
                 _require_file(path, MAX_AUDIO_BYTES)
                 source.sha256 = _hash(path)
                 staged = Evidence()
-                audio.audio(path, source_id, staged, "mixdown" if role == "mixdown" else f"stem:{source_id}", detail)
+                audio.audio(path, source_id, staged, "mixdown" if role == "mixdown" else f"stem:{source_id}", detail, analysis_backend)
                 _merge(evidence, staged)
                 continue
             fmt = formats.BY_NAME[role] if role in FLAG_FORMATS else formats.resolve(path)
@@ -157,13 +159,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--declarations", type=Path, help="Optional JSON array of user-declared facts")
     parser.add_argument("--detail", choices=("summary", "full"), default="summary",
                         help="summary (default) reports one summary per note track; full also lists every note")
+    parser.add_argument("--analysis-backend", choices=("builtin",), default="builtin",
+                        help="Audio estimator backend (builtin only)")
     args = parser.parse_args(argv)
     optionals = [(kind, path) for kind in ("stem", "midi", "solna", "dawproject", "project")
                  for path in getattr(args, kind)]
     if args.mixdown is None and not optionals:
         parser.error("supply at least one input: --mixdown, --stem, --midi, --solna, --project or --dawproject")
     try:
-        result = build(args.mixdown, optionals, args.declarations, args.detail)
+        result = build(args.mixdown, optionals, args.declarations, args.detail, args.analysis_backend)
         print(json.dumps(result.as_json(), ensure_ascii=False, allow_nan=False, indent=2))
         return 0
     except ValueError as error:
