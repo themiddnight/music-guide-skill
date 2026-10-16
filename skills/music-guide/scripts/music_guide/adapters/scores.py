@@ -117,37 +117,44 @@ def _notes(evidence: Evidence, source_id: str, method: str, prefix: str, facts: 
 
 
 def _tempo(evidence: Evidence, source_id: str, method: str, facts: ProjectFacts, data: ScoreData) -> None:
+    events = sorted(_distinct(data.tempos), key=lambda item: item[0])
+    if not events:
+        return
     by_beat: dict[float, float] = {}
-    for beat, bpm in data.tempos:
+    for beat, bpm in events:
         if by_beat.setdefault(beat, bpm) != bpm:
             evidence.diagnostics.append(Diagnostic(
                 "score_tempo_disagreement", "warning",
-                f"Parts disagree on the tempo at beat {beat:g} ({by_beat[beat]:g} and {bpm:g} BPM); the first was kept.",
-                source_id))
-    if not by_beat:
-        return
-    points = [{"beat": beat, "bpm": by_beat[beat]} for beat in sorted(by_beat)]
+                f"Stored tempo marks disagree at beat {beat:g} ({by_beat[beat]:g} and {bpm:g} BPM); "
+                "all distinct marks were retained.", source_id))
+    points = [{"beat": beat, "bpm": bpm} for beat, bpm in events]
     facts.tempo_map(points, data.tempo_locator)
-    if len({point["bpm"] for point in points}) == 1 and points[0]["beat"] == 0:
-        facts.tempo(points[0]["bpm"], data.tempo_locator,
+    if len({bpm for _, bpm in events}) == 1 and events[0][0] == 0:
+        facts.tempo(events[0][1], data.tempo_locator,
                     "Every stored tempo mark agrees and the first sits at the start; rubato, ritardando and "
                     "fermatas are not modeled.")
 
 
 def _meter(evidence: Evidence, source_id: str, method: str, prefix: str, facts: ProjectFacts,
            data: ScoreData) -> None:
-    by_beat: dict[float, tuple[int, int]] = {}
-    for beat, numerator, denominator in data.meters:
-        by_beat.setdefault(beat, (numerator, denominator))
-    if not by_beat:
+    events = sorted(_distinct(data.meters), key=lambda item: item[0])
+    if not events:
         return
-    ordered = sorted(by_beat.items())
-    if len(_distinct([meter for _, meter in ordered])) == 1 and ordered[0][0] == 0:
-        facts.meter(*ordered[0][1], "time signature")
+    by_beat: dict[float, tuple[int, int]] = {}
+    for beat, numerator, denominator in events:
+        first = by_beat.setdefault(beat, (numerator, denominator))
+        if first != (numerator, denominator):
+            evidence.diagnostics.append(Diagnostic(
+                "score_meter_disagreement", "warning",
+                f"Stored time signatures disagree at beat {beat:g} ({first[0]}/{first[1]} and "
+                f"{numerator}/{denominator}); all distinct marks were retained.", source_id))
+    if len({(n, d) for _, n, d in events}) == 1 and events[0][0] == 0:
+        facts.meter(*events[0][1:], "time signature")
         return
     _extra(evidence, source_id, method, f"{prefix}.meter_map",
-           [{"beat": beat, "meter": f"{n}/{d}"} for beat, (n, d) in ordered], "signature", "project",
-           "project_beats", "time signatures", "Stored time signature changes in beat order.")
+           [{"beat": beat, "meter": f"{n}/{d}"} for beat, n, d in events], "signature", "project",
+           "project_beats", "time signatures", "Stored time signature events in beat order; simultaneous distinct "
+           "signatures are retained without part attribution.")
 
 
 def _key(evidence: Evidence, source_id: str, method: str, prefix: str, facts: ProjectFacts,

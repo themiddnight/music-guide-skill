@@ -112,9 +112,10 @@ class StereoMeter:
 
 
 class MusicFeatures:
-    """Downmixes and decimates to about 11 kHz, then keeps an onset envelope and a chroma sum.
+    """Decimates each channel to about 11 kHz and averages channel FFT magnitudes for onset and chroma.
 
-    Only these compact features are retained, so memory stays bounded for long files.
+    Blocks are samples by channels; frames are frames by channels by samples. Averaging magnitudes
+    preserves independently inverted channels. Only compact features are retained for long files.
     """
 
     def __init__(self, rate: int) -> None:
@@ -123,7 +124,7 @@ class MusicFeatures:
         # A history of whole output periods keeps every block start on the decimation grid.
         self.history = 8 * self.factor
         self.lowpass = signal.firwin(self.history + 1, 0.8 / self.factor)
-        self.pending = np.zeros(self.history)
+        self.pending: np.ndarray | None = None
         self.onset = Framer(1024, 256)
         self.onset_window = signal.windows.hann(1024, sym=False)
         self.previous: np.ndarray | None = None
@@ -138,24 +139,25 @@ class MusicFeatures:
         self.samples = 0
 
     def feed(self, block: np.ndarray) -> None:
-        mono = block @ np.full(block.shape[1], 1 / block.shape[1])
-        if self.factor > 1:
-            mono = self._decimate(mono)
-        self.samples += len(mono)
-        self._onsets(self.onset.push(mono))
-        self._chroma(self.chroma_frames.push(mono))
+        samples = self._decimate(block) if self.factor > 1 else block
+        self.samples += len(samples)
+        self._onsets(self.onset.push(samples))
+        self._chroma(self.chroma_frames.push(samples))
 
-    def _decimate(self, mono: np.ndarray) -> np.ndarray:
-        buffer = np.concatenate([self.pending, mono])
+    def _decimate(self, block: np.ndarray) -> np.ndarray:
+        if self.pending is None:
+            self.pending = np.zeros((self.history, block.shape[1]))
+        buffer = np.concatenate([self.pending, block])
         outputs = (len(buffer) - 1) // self.factor + 1
-        decimated = signal.upfirdn(self.lowpass, buffer, down=self.factor)[self.history // self.factor:outputs]
+        decimated = signal.upfirdn(self.lowpass, buffer, down=self.factor, axis=0)[self.history // self.factor:outputs]
         self.pending = buffer[outputs * self.factor - self.history:]
         return decimated
 
     def _onsets(self, frames: np.ndarray) -> None:
         if not frames.size:
             return
-        magnitude = np.log1p(100 * np.abs(np.fft.rfft(frames * self.onset_window, axis=-1)))
+        magnitude = np.mean(np.abs(np.fft.rfft(frames * self.onset_window, axis=-1)), axis=1)
+        magnitude = np.log1p(100 * magnitude)
         if self.previous is None:
             self.previous = magnitude[0]
         diffs = np.diff(np.vstack([self.previous, magnitude]), axis=0)
@@ -164,7 +166,8 @@ class MusicFeatures:
 
     def _chroma(self, frames: np.ndarray) -> None:
         if frames.size:
-            magnitude = np.abs(np.fft.rfft(frames * self.chroma_window, axis=-1))[:, self.chroma_bins]
+            magnitude = np.mean(np.abs(np.fft.rfft(frames * self.chroma_window, axis=-1)), axis=1)
+            magnitude = magnitude[:, self.chroma_bins]
             self.chroma += np.bincount(self.chroma_class, weights=np.sum(magnitude, axis=0), minlength=12)
 
     def finish(self) -> None:

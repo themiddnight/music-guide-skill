@@ -146,7 +146,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Extract local music evidence as JSON")
+    parser = argparse.ArgumentParser(prog="analyze.py", description="Extract local music evidence as JSON")
     parser.add_argument("--mixdown", type=Path, help="Rendered mixdown audio; without it only stored intent is analyzed")
     parser.add_argument("--midi", action="append", type=Path, default=[])
     parser.add_argument("--stem", action="append", type=Path, default=[], help="Stem audio; measured independently")

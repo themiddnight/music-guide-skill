@@ -226,14 +226,16 @@ def _estimate_facts(features: MusicFeatures, note: str) -> list[Fact]:
     profile = features.pitch_class_profile()
     if profile is not None:
         facts.append(Fact("audio.pitch_class_profile", profile, "ratio", "chroma-fft",
-                          "Share of 65-2100 Hz spectral magnitude per pitch class (A4=440 Hz, downmixed, about 11 kHz)."
+                          "Share of 65-2100 Hz spectral magnitude per pitch class (A4=440 Hz, about 11 kHz per channel)."
+                          " FFT magnitudes are averaged across channels to avoid polarity cancellation."
                           " Overtones fold into other classes, so this is spectral energy, not played notes." + note,
                           "medium"))
     tempo = features.tempo()
     if tempo is not None:
         facts.append(Fact("audio.tempo_estimate", tempo, "BPM", "onset-autocorrelation",
                           "Estimate, not a fact: top autocorrelation peaks of a spectral-flux onset envelope within"
-                          " 60-200 BPM. Half- and double-time readings are equally consistent with periodicity alone;"
+                          " 60-200 BPM, using FFT magnitudes averaged across channels before computing flux."
+                          " Half- and double-time readings are equally consistent with periodicity alone;"
                           " rubato, swing and tempo changes are averaged away." + note, "low", "inferred"))
     key = features.key()
     if key is not None:
