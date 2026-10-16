@@ -345,5 +345,30 @@ class DuplicateKeyTest(CliCase):
         self.assertIn("nonfinite", next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error"))
 
 
+class MessageTest(CliCase):
+    def optional_message(self, *args):
+        data = self.evidence(*args)
+        return next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error")
+
+    def test_mismatch_message_has_no_doubled_noun(self):
+        message = self.optional_message("--project", self.write("fake.mid", b"not midi"))
+        self.assertIn("does not match the Standard MIDI file it is named as", message)
+        self.assertNotIn("file file", message)
+
+    def test_audio_given_as_a_project_points_to_mixdown_and_stem(self):
+        for name in ("take.wav", "song.FLAC", "bounce.mp3", "loop.aiff"):
+            with self.subTest(name=name):
+                message = self.optional_message("--project", self.write(name, b"RIFF"))
+                self.assertIn("--mixdown", message)
+                self.assertIn("--stem", message)
+
+    def test_test_only_dependency_is_not_a_skill_requirement(self):
+        skill = (SKILL / "requirements.txt").read_text().lower()
+        self.assertNotIn("jsonschema", skill)
+        dev = (ROOT / "requirements-dev.txt").read_text()
+        self.assertIn("-r skills/music-guide/requirements.txt", dev)
+        self.assertIn("jsonschema", dev)
+
+
 if __name__ == "__main__":
     unittest.main()

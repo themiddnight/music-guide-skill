@@ -112,8 +112,18 @@ BY_NAME = {item.name: item for item in FORMATS}
 assert len(BY_NAME) == len(FORMATS), "format names must be unique"
 
 
+AUDIO_SUFFIXES = frozenset({".wav", ".wave", ".aif", ".aiff", ".aifc", ".flac", ".ogg", ".oga", ".opus", ".mp3", ".caf",
+                            ".w64", ".au", ".m4a", ".aac"})
+
+
+def _noun(item: ProjectFormat) -> str:
+    return item.label if item.label.endswith(f" {item.kind}") else f"{item.label} {item.kind}"
+
+
 def resolve(path: Path) -> ProjectFormat | None:
     """Pick the format by extension and content signature; None means the extension is unknown."""
+    if path.suffix.lower() in AUDIO_SUFFIXES:
+        raise ValueError(f"{path.name} is an audio file; pass rendered audio with --mixdown or --stem, not --project")
     candidates = [item for item in FORMATS if path.suffix.lower() in item.extensions]
     if not candidates:
         return None
@@ -122,5 +132,5 @@ def resolve(path: Path) -> ProjectFormat | None:
             return item
         if item.kind == "file" and path.is_file() and item.detect(path):
             return item
-    labels = " or ".join(f"{item.label} {item.kind}" for item in candidates)
+    labels = " or ".join(_noun(item) for item in candidates)
     raise ValueError(f"source does not match the {labels} it is named as")

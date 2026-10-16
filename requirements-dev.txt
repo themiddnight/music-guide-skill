@@ -1,0 +1,2 @@
+-r skills/music-guide/requirements.txt
+jsonschema>=4.18,<5
