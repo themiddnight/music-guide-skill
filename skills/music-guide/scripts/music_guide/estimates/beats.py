@@ -36,6 +36,9 @@ MIN_METER_BEATS = 24
 # beat show a chord change at that beat without smearing it onto the neighbouring beats.
 CHANGE_OFFSET = 0.4
 METERS = ((2, "2/4"), (3, "3/4"), (4, "4/4"), (6, "6/8"))
+# Share of beat-accent variance a bar must explain beyond chance. Unaccented and randomly jittered click tracks
+# reach at most 0.08; the three reference songs score 0.17 (itipiso) to 0.77 (Winterstory).
+MIN_METER_SCORE = 0.12
 MIN_SWING_PAIRS = 16
 # An off-beat peak counts toward swing only when it reaches this share of the onset on the beat before it.
 OFFBEAT_SHARE = 0.2
@@ -114,9 +117,11 @@ BEAT_METHOD = Method("ellis-dp-beats",
                      " only as far as the tightness penalty allows. tempoStability is low when the beat intervals vary"
                      " or when beats miss the onsets, as they do through a tempo change the grid cannot follow.")
 METER_METHOD = Method("accent-pattern-meter",
-                      "bars of 2, 3, 4 or 6 tracked beats scored by how much low-band onset strength and pitch-class"
-                      " change concentrate on one beat position. 2/4 and 4/4, and 3/4 and 6/8, are often equally"
-                      " consistent with accents alone; a pickup or an intro without accents can shift the downbeat.")
+                      "bars of 2, 3, 4 or 6 tracked beats scored by the share of per-beat accent variance (low-band"
+                      " onset strength and pitch-class change) that the bar's per-position means explain beyond"
+                      " chance; the downbeat is the position with the strongest mean accent. 2/4 and 4/4, and 3/4"
+                      " and 6/8, differ only by a weaker accent mid-bar, so they are often close; a pickup or an"
+                      " intro without accents can shift the downbeat.")
 SWING_METHOD = Method("offbeat-onset-position",
                       "median long-to-short ratio of the strongest onset between consecutive beats, counted only at"
                       " 40-80% of the beat. It skips when the mean onset pattern between beats has two similar peaks,"
@@ -266,14 +271,24 @@ def meter(store: FeatureStore, beats: BeatGrid) -> MeterEstimate | Skip:
     # Low-band strength is relative to its mean because its scale depends on the mix; cosine distance already has
     # an absolute scale, so a near-constant chroma (a click track) adds near zero instead of amplified noise.
     accent = _contrast(low) + change - np.mean(change)
+    centred = accent - np.mean(accent)
+    total = float(np.sum(centred ** 2))
+    if not total > 0:
+        return Skip("the tracked beats carry no low-band or pitch-class accent, so no bar pattern can be read.")
     scored = []
     for size, signature in METERS:
-        phases = [float(np.mean(accent[phase::size]) - np.mean(np.delete(accent, np.s_[phase::size])))
-                  for phase in range(size)]
-        best = int(np.argmax(phases))
-        scored.append((round(phases[best], 3), signature, best, size))
+        position = np.arange(len(accent)) % size
+        counts = np.bincount(position, minlength=size)
+        means = np.bincount(position, weights=centred, minlength=size) / counts
+        explained = float(np.sum(counts * means ** 2)) / total
+        # Under a random order of the same accents a bar of `size` positions explains (size - 1) / (beats - 1) of the
+        # variance on average, so the raw share would favour longer bars.
+        scored.append((round(explained - (size - 1) / (len(accent) - 1), 3), signature, int(np.argmax(means)), size))
     scored.sort(key=lambda item: -item[0])
-    _, _, phase, size = scored[0]
+    score, signature, phase, size = scored[0]
+    if score < MIN_METER_SCORE:
+        return Skip(f"no bar pattern stands out: the best, {signature}, explains {score:.2f} of the beat-accent"
+                    f" variance beyond chance, below {MIN_METER_SCORE:g}.")
     return MeterEstimate(tuple((signature, score) for score, signature, _, _ in scored), phase, times[phase::size])
 
 

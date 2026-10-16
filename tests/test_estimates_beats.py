@@ -120,12 +120,40 @@ class MeterTest(unittest.TestCase):
                     self.assertEqual(estimate.downbeat_phase, pickup)
                     self.assertGreaterEqual(np.mean(nearest(downbeats, estimate.downbeats) <= 0.03), 0.95)
 
-    def test_unaccented_clicks_do_not_claim_a_confident_meter(self):
-        samples, _, _ = click_track(120, 4, 40, accent=False)
-        store, grid = grid_of(samples)
-        estimate = beats.meter(store, grid)
-        self.assertEqual({signature for signature, _ in estimate.candidates}, {"2/4", "3/4", "4/4", "6/8"})
-        self.assertLess(estimate.candidates[0][1] - estimate.candidates[1][1], 0.1)
+    def test_unaccented_and_jittered_clicks_make_no_meter_claim(self):
+        tracks = [click_track(120, 4, 40, accent=False)[0]]
+        click = _burst(RATE, None, 0.04, 1)
+        for seed in range(6):
+            rng = np.random.default_rng(seed)
+            samples = np.zeros(40 * RATE)
+            for at in np.arange(0.5, 38.5, 0.5):
+                start = int((at + rng.normal(0, 0.01)) * RATE)
+                samples[start:start + len(click)] += rng.uniform(0.2, 0.4) * click
+            tracks.append(samples)
+        for index, samples in enumerate(tracks):
+            with self.subTest(track=index):
+                store, grid = grid_of(samples)
+                estimate = beats.meter(store, grid)
+                self.assertIsInstance(estimate, Skip)
+                self.assertIn("no bar pattern stands out", estimate.reason)
+
+    def test_a_weaker_mid_bar_accent_keeps_the_longer_bar(self):
+        # A kick at 0.25 puts the mid-bar low-band accent at about 0.7 of the downbeat's, above the off-beats.
+        for beats_per_bar, secondary, expected, rival in ((4, 2, "4/4", "2/4"), (6, 3, "6/8", "3/4")):
+            with self.subTest(meter=expected):
+                samples, truth, downbeats = click_track(120, beats_per_bar, 60)
+                kick = _burst(RATE, 60.0, 0.2, 2)
+                for at in truth[secondary::beats_per_bar]:
+                    start = int(round(at * RATE))
+                    part = kick[:len(samples) - start]
+                    samples[start:start + len(part)] += 0.25 * part
+                store, grid = grid_of(samples)
+                estimate = beats.meter(store, grid)
+                ranked = [signature for signature, _ in estimate.candidates]
+                self.assertEqual(ranked[0], expected)
+                self.assertLess(ranked.index(expected), ranked.index(rival))
+                self.assertEqual(estimate.downbeat_phase, 0)
+                self.assertGreaterEqual(np.mean(nearest(downbeats, estimate.downbeats) <= 0.03), 0.95)
 
 
 class SwingTest(unittest.TestCase):
