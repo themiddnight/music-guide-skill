@@ -2,16 +2,18 @@
 
 | Flag | Accepted content | Bound | Evidence |
 | --- | --- | --- | --- |
-| `--mixdown` | Optional audio that libsndfile decodes: WAV, RF64, W64, AIFF, FLAC, CAF, OGG Vorbis/Opus, MP3 | 4 GiB | Format, duration, channels, sample rate, sample peak, RMS, crest factor, full-scale sample count, integrated/momentary/short-term loudness, LRA, true peak, short-term loudness timeline, band energy, spectral centroid, stereo correlation and side-to-mid ratio, pitch-class profile, inferred tempo and key candidates |
-| `--stem` | Same as `--mixdown` | 4 GiB each | Same measurements, independent source scope |
-| `--midi` | SMF 0/1 with ticks per quarter note | 32 MiB each | Tempo and meter maps, static tempo/meter for constant files, track names, per-track note summaries; paired notes with `--detail full` |
+| `--mixdown` | Optional audio that libsndfile decodes: WAV, RF64, W64, AIFF, FLAC, CAF, OGG Vorbis/Opus, MP3 | 4 GiB, 6 hours, peak magnitude up to 1e6 (+120 dBFS) | Format, duration, channels, sample rate, sample peak, RMS, crest factor, full-scale sample count, integrated/momentary/short-term loudness, LRA, true peak, short-term loudness timeline, band energy, spectral centroid, stereo correlation and side-to-mid ratio, pitch-class profile, inferred tempo and key candidates |
+| `--stem` | Same as `--mixdown` | Same as `--mixdown`, each | Same measurements, independent source scope |
+| `--midi` | SMF 0/1 with ticks per quarter note | 4 MiB each | Tempo and meter maps, static tempo/meter for constant files, track names, per-track note summaries; paired notes with `--detail full` |
 | `--solna` | JSON formatVersion <= 12 with validated inspected fields | 8 MiB each | Stored BPM, meter ID, loop scale IDs and chords |
-| `--dawproject` | ZIP with one stored or deflated project.xml and an optional metadata.xml | 64 MiB archive, 8 MiB XML, 256 entries | Project version, application, metadata, transport tempo/meter, tempo and meter automation, tracks with plugins, clip counts, notes, markers and media basenames |
+| `--dawproject` | ZIP with one stored or deflated project.xml and an optional metadata.xml | 64 MiB archive, 8 MiB XML, 16384 entries, 8 MiB central directory; members that are not read are not size-bounded | Project version, application, metadata, transport tempo/meter, tempo and meter automation, tracks with plugins, clip counts, notes, markers and media basenames |
 | `--project` | Any project file or package; the format is detected from the extension and content signature | Per format in `formats.py` | Parsed evidence for a supported format; otherwise an inventory with format-specific export guidance |
 | `--declarations` | JSON array under declarations schema | 8 MiB | User supplied static facts |
-| `--detail` | `summary` (default) or `full` | Not applicable | `full` adds one observation per stored note |
+| `--detail` | `summary` (default) or `full` | At most 50,000 listed notes per source | `full` adds one observation per stored note |
 
 At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--dawproject` is required; declarations alone are not enough. Without a mixdown the report carries a `no_mixdown` info diagnostic, because the rendered sound is unknown. A supplied mixdown that cannot be read is still fatal.
+
+Shared bounds keep hostile files from exhausting memory or flooding the report. Every XML parse refuses more than 2,000,000 elements or nesting deeper than 256. Each project source reports at most 5000 tracks, plugins, markers and media references, with one `project_list_truncated` warning per capped property. MIDI tempo, meter and track-name lists are capped at 5000, and unmatched note-ons or note-offs become one counted diagnostic per track. Stored tempo is accepted from above 0 up to 1000 BPM, and meter from 1 to 99 beats over a power-of-two denominator up to 64; other values are rejected rather than reported. Any unexpected failure inside an optional source becomes that source's `optional_source_error`, so the rest of the report survives.
 
 `--project` accepts these formats. A directory package must be passed as the directory. An extension whose content does not match the format's signature is reported as a source error rather than guessed. An unknown extension is inventoried with generic export guidance.
 

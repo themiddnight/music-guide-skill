@@ -9,7 +9,7 @@ Help with music theory, composition, arrangement, production, mixing, mastering,
 
 ## Run the evidence tool
 
-Locate this skill directory and run its absolute `scripts/analyze.py` path. Prefer `uv run --no-project --with-requirements <skill>/requirements.txt python <skill>/scripts/analyze.py ...` when `uv` is available. Otherwise reuse or create a virtual environment in the user's working directory, install `requirements.txt` into it, and invoke that environment's interpreter explicitly. Do not assume system `python3` has the packages. Exit code 3 means a dependency is missing; the message names the fix.
+Locate this skill directory and run its absolute `scripts/analyze.py` path. Prefer `uv run --no-project --with-requirements <skill>/requirements.txt python <skill>/scripts/analyze.py ...` when `uv` is available. Otherwise reuse or create a virtual environment in the user's working directory, install `requirements.txt` into it, and invoke that environment's interpreter explicitly. Do not assume system `python3` has the packages. The tool needs Python 3.10 or newer. Exit code 3 means a dependency is missing or the interpreter is too old; the message names the fix. Pass audio files to `--mixdown` or `--stem`, not `--project`.
 
 Pass only files the user supplied:
 

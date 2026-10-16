@@ -67,7 +67,7 @@ Set up Music Guide's Python requirements in a virtual environment in my
 working folder. Use that environment's interpreter for the analysis.
 ```
 
-The requirements file is included in the installed skill, so no repository clone is needed. Keep the environment outside the plugin cache so plugin updates do not replace it. If a package is missing, the tool exits with code 3 and names the requirements file. General theory questions do not require the analysis tools.
+The requirements file is included in the installed skill, so no repository clone is needed. Keep the environment outside the plugin cache so plugin updates do not replace it. If a package is missing or Python is older than 3.10, the tool exits with code 3 and prints the fix. General theory questions do not require the analysis tools.
 
 ### Install from a local checkout
 
@@ -247,9 +247,10 @@ Keep analysis reports and virtual environments separately if you want them to su
 
 Validation includes synthetic fixtures for every format, standard loudness test signals cross-checked against ffmpeg's EBU R128 meter, and three user-provided reference sets (WAV with MIDI and SOLNA, MP3 with a Logic Pro project, WAV with a Cubase project) on macOS. Committed fixtures are synthetic. Other operating systems, real projects for most DAW formats, and end-to-end model response quality remain unverified. See the [verification record](docs/verification.md) for evidence and remaining limits.
 
-Run the behavior tests with the environment that has the requirements installed:
+Run the behavior tests in an environment with the development requirements, which add the test-only `jsonschema` package:
 
 ```sh
+.venv/bin/python -m pip install -r requirements-dev.txt
 PYTHONWARNINGS=error .venv/bin/python -m unittest discover -s tests -v
 ```
 
