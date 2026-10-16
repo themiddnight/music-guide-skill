@@ -120,7 +120,7 @@ Supply a mixdown for each version and describe what changed. Ask Music Guide to 
 
 ### Prepare a mix or mastering review
 
-The report measures integrated, momentary and short-term loudness (LUFS), loudness range, true peak (dBTP), crest factor, band energy, spectral centroid, and stereo correlation. Use them as a first check, then ask for a listening plan for masking and problem moments, which whole-file averages cannot locate. Confirm final delivery numbers with a dedicated meter.
+The report measures integrated, momentary and short-term loudness (LUFS), loudness range, true peak (dBTP), crest factor, band energy, spectral centroid, and stereo correlation, plus low-confidence tempo, key and key-timeline estimates. Use them as a first check, then ask for a listening plan for masking and problem moments, which whole-file averages cannot locate. Confirm final delivery numbers with a dedicated meter.
 
 ### Develop a visual direction
 

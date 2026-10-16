@@ -245,8 +245,18 @@ def _estimate_facts(features: MusicFeatures, note: str) -> list[Fact]:
         facts.append(Fact("audio.key_estimate", key, "key", "krumhansl-kessler-chroma",
                           "Estimate, not a fact: correlation of the whole-file chroma with Krumhansl-Kessler major and"
                           " minor profiles. Modal, non-diatonic or pentatonic music (for example Hirajoshi), key changes"
-                          " and detuning can be mislabelled; read audio.pitch_class_profile directly." + note,
+                          " and detuning can be mislabelled; read audio.pitch_class_profile directly, and"
+                          " audio.key_timeline for key changes." + note,
                           "low", "inferred"))
+    timeline = features.key_timeline()
+    if timeline is not None:
+        facts.append(Fact("audio.key_timeline", timeline, "key", "krumhansl-kessler-chroma-windows",
+                          "Estimate, not a fact: each 5 s cell is labelled by the Krumhansl-Kessler key of a centered"
+                          " 25 s chroma window, runs shorter than 15 s are merged into a neighbour, and each segment's"
+                          " candidates come from its own summed chroma. A new segment suggests a modulation or a"
+                          " tonicized section; boundaries are accurate to about one window, and changes shorter than"
+                          " 15 s are not shown. The same modal and pentatonic caveats as audio.key_estimate apply."
+                          + note, "low", "inferred"))
     return facts
 
 

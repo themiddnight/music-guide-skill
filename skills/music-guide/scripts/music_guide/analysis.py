@@ -19,6 +19,12 @@ MAX_FEATURE_CHANNELS = 8
 TEMPO_RANGE = (60.0, 200.0)
 MIN_TEMPO_SECONDS = 8.0
 MIN_KEY_SECONDS = 2.0
+# The key timeline sums chroma into 5 s cells, labels each cell by a centered 25 s window and
+# merges runs shorter than 15 s, so a passing chord cannot read as a modulation.
+KEY_CELL_SECONDS = 5.0
+KEY_WINDOW_CELLS = 5
+MIN_KEY_SEGMENT_CELLS = 3
+MIN_KEY_TIMELINE_SECONDS = 30.0
 
 
 class Framer:
@@ -138,8 +144,10 @@ class MusicFeatures:
         freqs = np.fft.rfftfreq(8192, 1 / self.rate)
         audible = (freqs >= 65.0) & (freqs <= min(2100.0, 0.4 * self.rate))
         self.chroma_bins = np.flatnonzero(audible)
-        self.chroma_class = np.round(69 + 12 * np.log2(freqs[audible] / 440.0)).astype(int) % 12
-        self.chroma = np.zeros(12)
+        chroma_class = np.round(69 + 12 * np.log2(freqs[audible] / 440.0)).astype(int) % 12
+        self.chroma_matrix = np.eye(12)[chroma_class]
+        self.chroma_cells = np.zeros((0, 12))
+        self.chroma_frame_count = 0
         self.samples = 0
         self.channels: int | None = None
         self.fold: np.ndarray | None = None
@@ -182,11 +190,23 @@ class MusicFeatures:
     def _chroma(self, frames: np.ndarray) -> None:
         if frames.size:
             magnitude = np.mean(np.abs(np.fft.rfft(frames * self.chroma_window, axis=-1)), axis=1)
-            magnitude = magnitude[:, self.chroma_bins]
-            self.chroma += np.bincount(self.chroma_class, weights=np.sum(magnitude, axis=0), minlength=12)
+            per_frame = magnitude[:, self.chroma_bins] @ self.chroma_matrix
+            centers = (np.arange(len(per_frame)) + self.chroma_frame_count) * self.chroma_frames.hop
+            centers = (centers + self.chroma_frames.size / 2) / self.rate
+            cells = (centers // KEY_CELL_SECONDS).astype(int)
+            if cells[-1] >= len(self.chroma_cells):
+                grown = np.zeros((cells[-1] + 1, 12))
+                grown[:len(self.chroma_cells)] = self.chroma_cells
+                self.chroma_cells = grown
+            np.add.at(self.chroma_cells, cells, per_frame)
+            self.chroma_frame_count += len(per_frame)
 
     def finish(self) -> None:
         self._chroma(self.chroma_frames.flush())
+
+    @property
+    def chroma(self) -> np.ndarray:
+        return np.sum(self.chroma_cells, axis=0)
 
     @property
     def seconds(self) -> float:
@@ -209,6 +229,11 @@ class MusicFeatures:
         if self.pitch_class_profile() is None:
             return None
         return estimate_key(self.chroma)
+
+    def key_timeline(self) -> dict | None:
+        if self.seconds < MIN_KEY_TIMELINE_SECONDS or self.pitch_class_profile() is None:
+            return None
+        return estimate_key_timeline(self.chroma_cells, self.seconds)
 
 
 def estimate_tempo(envelope: np.ndarray, frame_rate: float) -> dict | None:
@@ -239,6 +264,51 @@ def estimate_tempo(envelope: np.ndarray, frame_rate: float) -> dict | None:
     top = [{"bpm": bpm, "relativeStrength": round(strength / best, 3)} for strength, bpm in candidates[:3]]
     octave = any(abs(a["bpm"] / b["bpm"] - 2) < 0.06 for a in top for b in top)
     return {"candidates": top, "octaveRelatedCandidates": octave}
+
+
+def estimate_key_timeline(cells: np.ndarray, seconds: float) -> dict | None:
+    half = KEY_WINDOW_CELLS // 2
+    labels = []
+    for index in range(len(cells)):
+        key = estimate_key(np.sum(cells[max(0, index - half):index + half + 1], axis=0))
+        labels.append(None if key is None else _top_key(key))
+    runs: list[list] = []
+    for index, label in enumerate(labels):
+        if runs and label in (None, runs[-1][2]):
+            runs[-1][1] = index + 1
+        elif label is None:
+            runs.append([index, index + 1, None])
+        else:
+            runs.append([index, index + 1, label])
+    while True:
+        short = [i for i, run in enumerate(runs) if run[1] - run[0] < MIN_KEY_SEGMENT_CELLS]
+        if len(runs) < 2 or not short:
+            break
+        index = min(short, key=lambda i: runs[i][1] - runs[i][0])
+        neighbor = index - 1 if index > 0 else index + 1
+        first, second = sorted((index, neighbor))
+        runs[first:second + 1] = [[runs[first][0], runs[second][1], runs[neighbor][2]]]
+    segments: list[dict] = []
+    for start, end, _ in runs:
+        key = estimate_key(np.sum(cells[start:end], axis=0))
+        if key is None:
+            continue
+        if segments and _top_key(segments[-1]["key"]) == _top_key(key):
+            segments[-1]["end"] = end
+            segments[-1]["key"] = estimate_key(np.sum(cells[segments[-1]["start"]:end], axis=0))
+        else:
+            segments.append({"start": start, "end": end, "key": key})
+    if not segments:
+        return None
+    return {"windowSeconds": KEY_WINDOW_CELLS * KEY_CELL_SECONDS,
+            "segments": [{"startSeconds": round(0.0 if i == 0 else item["start"] * KEY_CELL_SECONDS, 1),
+                          "endSeconds": round(seconds if i == len(segments) - 1
+                                              else item["end"] * KEY_CELL_SECONDS, 1),
+                          "candidates": item["key"]["candidates"]} for i, item in enumerate(segments)]}
+
+
+def _top_key(key: dict) -> tuple[str, str]:
+    return key["candidates"][0]["tonic"], key["candidates"][0]["mode"]
 
 
 def estimate_key(chroma: np.ndarray) -> dict | None:

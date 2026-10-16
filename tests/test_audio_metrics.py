@@ -223,6 +223,35 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertGreater(sum(profile[name] for name in ("E", "F", "A", "B", "C")), 0.75)
         self.assertTrue(all(profile[name] < 0.05 for name in ("C#", "D", "D#", "F#", "G", "G#", "A#")))
 
+    def progression(self, roots: tuple[int, ...], seconds: float) -> np.ndarray:
+        chords = [note(root, 2) + note(root + 4, 2) + note(root + 7, 2) for root in roots]
+        return np.concatenate([chords[index % len(chords)] for index in range(int(seconds // 2))])
+
+    def test_key_timeline_shows_a_modulation_between_sections(self):
+        mono = np.concatenate([self.progression((60, 65, 67), 30), self.progression((67, 60, 62), 30)])
+        data = self.analyze(stereo(mono))
+        fact = data["facts"]["audio.key_timeline"]
+        self.assertEqual((fact["provenance"], fact["confidence"]), ("inferred", "low"))
+        segments = fact["value"]["segments"]
+        tops = [(item["candidates"][0]["tonic"], item["candidates"][0]["mode"]) for item in segments]
+        self.assertEqual(tops, [("C", "major"), ("G", "major")])
+        self.assertEqual(segments[0]["startSeconds"], 0)
+        self.assertEqual(segments[-1]["endSeconds"], 60)
+        self.assertEqual(segments[0]["endSeconds"], segments[1]["startSeconds"])
+        self.assertLessEqual(abs(segments[1]["startSeconds"] - 30), fact["value"]["windowSeconds"])
+
+    def test_key_timeline_is_one_segment_without_modulation(self):
+        data = self.analyze(stereo(self.progression((60, 65, 67), 48)))
+        segments = self.value(data, "audio.key_timeline")["segments"]
+        self.assertEqual(len(segments), 1)
+        self.assertEqual((segments[0]["startSeconds"], segments[0]["endSeconds"]), (0, 48))
+        self.assertEqual(segments[0]["candidates"][0]["tonic"], "C")
+
+    def test_key_timeline_needs_enough_audio(self):
+        data = self.analyze(stereo(self.progression((60, 65, 67), 12)))
+        self.assertIn("audio.key_estimate", data["facts"])
+        self.assertNotIn("audio.key_timeline", data["facts"])
+
     def test_key_and_pitch_profile_survive_antiphase_stereo(self):
         chord = note(60, 4) + note(64, 4) + note(67, 4)
         control = self.analyze(stereo(chord))
