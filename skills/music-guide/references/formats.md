@@ -31,7 +31,7 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 | FL Studio | `.flp` | Inventory; export stems and MIDI |
 | Studio One | `.song` | Inventory; export DAWproject (6.5+) or stems and MIDI |
 | Ardour | `.ardour` | Inventory; export stems and MIDI |
-| LMMS | `.mmp`, `.mmpz` | Inventory; export audio and MIDI |
+| LMMS | `.mmp`, `.mmpz` | Parsed: tempo, meter, tracks, plugins, note summaries |
 | AAF, OMF | `.aaf`, `.omf` | Inventory |
 | MusicXML | `.musicxml`, `.mxl` | Inventory; export MIDI |
 | MuseScore | `.mscz` | Inventory; export MIDI |
@@ -50,6 +50,17 @@ The adapter reads only `Resources/ProjectInformation.plist` and each `Alternativ
 - `tempo` (`BeatsPerMinute`), `meter` (`SongSignatureNumerator` and `SongSignatureDenominator`), `project.key` (`SongKey` and `SongGenderKey`, joined as "D minor"), `project.sample_rate` and `project.track_count` (`NumberOfTracks`) are stored settings per alternative. The tempo is the project start tempo; a tempo map in `ProjectData` is not read. Logic stores a key even when the user never set one, so treat `project.key` as stored intent. A key with only one half present is reported as `logic.partial_key` instead.
 - `project.media_reference` lists basenames from `AudioFiles`, `UnusedAudioFiles`, `PlaybackFiles`, `SamplerInstrumentsFiles`, `QuicksamplerFiles`, `ImpulsResponsesFiles` and `UltrabeatFiles`; the list name is the end of the locator and `logic.media_list` carries the role and path count. `logic.bundled_media` counts regular files under `Media/` by name only; links are counted but not followed.
 - Not extracted: track names and kinds, regions, MIDI notes, plugins, tempo and meter changes, markers. An info diagnostic `project_data_not_read` says so.
+
+## LMMS projects
+
+Sources: LMMS 1.2.2 `DataFile.cpp`, `Song.cpp`, `Track.cpp`, `Note.cpp`, `MidiTime.h`, `AutomatableModel.cpp` and `MidiExport.cpp`, the LMMS 1.3 clip renames in `DataFile.cpp`, and the 1.2.2 demo projects.
+
+LMMS parses a file as XML first and falls back to `qUncompress`, so the adapter does the same: an `.mmpz` is a 4-byte big-endian length followed by a zlib stream. Both the file and the inflated XML are limited to 32 MiB, inflation is bounded against zlib bombs, and a declared length over the limit is refused. LMMS writes a bare `<!DOCTYPE lmms-project>`; only that exact line is removed, so any other DTD or entity is still rejected. Detection needs `<?xml`, `<!DOCTYPE lmms-project`, `<lmms-project` or a valid zlib header after the length.
+
+- `project.application` is `creator` plus `creatorversion`. `tempo` is `head/@bpm` and `meter` is `head/@timesig_numerator` over `@timesig_denominator`. When LMMS stores the tempo as a `<bpm>` element (automated or log-scaled) the value is the one at save time, the reason says so, and the warning `tempo_model_is_element` is added.
+- Every `track` in the song container and, for beat/bassline tracks, every track in the nested pattern store becomes a `project.track` (type 0 instrument, 1 beat/bassline as group, 2 sample as audio, others unknown); `lmms.track_type` carries the type code, label and container. `project.plugin` lists instrument and effect names from tracks and from the mixer, `project.clip_count` counts the pattern, sample, beat/bassline and automation clips of a track, and `project.media_reference` lists `src` basenames of sample clips and instruments.
+- Notes come from `note` elements in MIDI clips (`pattern`, or `midiclip` in 1.3). Ticks convert to quarter notes at 48 ticks per quarter (192 per whole note in every meter). Pitch is `key + 12`, so LMMS key 57 is A4, as in the LMMS MIDI export; base-note and master-pitch transposition are not applied. Velocity is `vol * 127 / 200`. A negative length marks a beat step note and is taken as its magnitude. Positions inside a nested beat/bassline pattern are local to that pattern, not placed on the song timeline.
+- Not extracted: automation values, the placement of beat/bassline clips on the timeline, sample rate (LMMS keeps it in its settings), instrument settings, and any embedded `data`.
 
 ## Add an adapter
 

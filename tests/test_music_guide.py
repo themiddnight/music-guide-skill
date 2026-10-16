@@ -512,8 +512,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.flp", b"FLhd\x06\x00", "fl-studio-flp", "MIDI file"),
             ("song.song", zipped, "studio-one-song", "DAWproject"),
             ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),
-            ("song.mmp", b"<lmms-project/>", "lmms-project", "Export MIDI"),
-            ("song.mmpz", b"\x00\x00\x01\x00x", "lmms-project", "Export MIDI"),
             ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
             ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
