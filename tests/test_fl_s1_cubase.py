@@ -394,7 +394,7 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
             "project_track:0": {"name": "Vox", "kind": "audio", "index": 0},
             "project_track:1": {"name": "Keys", "kind": "instrument", "index": 1},
-            "project_track:2": {"name": "Group", "kind": "unknown", "index": 2}})
+            "project_track:2": {"name": "Group", "kind": "folder", "index": 2}})
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.clip_count")},
                          {"project_track:0": 1, "project_track:1": 1, "project_track:2": 0})
         self.assertEqual([(item["value"]["name"], item["scope"]) for item in self.items(data, "project.plugin")],
@@ -469,6 +469,51 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.media_reference"), [])
         self.assertEqual(len([item for item in data["diagnostics"] if item["code"] == "studioone_part_unreadable"]), 2)
         self.assertEqual(len(self.values(data, "project.track")), 3)
+
+
+    def invalid(self, data, fragment):
+        return [item for item in data["diagnostics"] if item["code"] == "studioone_attribute_invalid"
+                and fragment in item["message"]]
+
+    def test_unparsable_attributes_skip_the_item_with_a_warning(self):
+        song = song_xml().replace('<MarkerEvent start="16" timeFormat="2" name="Chorus"/>',
+                                  '<MarkerEvent start="abc" timeFormat="2" name="Chorus"/>')
+        data = self.project(self.write(song=song))
+        self.assertEqual([item["value"]["name"] for item in self.items(data, "project.marker")], ["Start"])
+        self.assertTrue(self.invalid(data, "start"), data["diagnostics"])
+        only = song_xml(tempos='<TempoMapSegment curveType="0" start="junk" end="1e200" tempo="0.5"/>')
+        data = self.project(self.write("tempo.song", song=only))
+        self.assertEqual(self.values(data, "tempo") + self.values(data, "project.tempo_map"), [])
+        self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "start='junk'" in item["message"]
+                            for item in data["diagnostics"]), data["diagnostics"])
+        rate = song_xml().replace('sampleRate="44100"', 'sampleRate="fast"')
+        data = self.project(self.write("rate.song", song=rate))
+        self.assertTrue(self.invalid(data, "sampleRate"), data["diagnostics"])
+
+    def test_dropped_tempo_and_meter_segments_are_reported_and_block_a_static_claim(self):
+        for bad in ('tempo="0"', 'tempo="junk"'):
+            tempos = ONE_TEMPO + f'<TempoMapSegment curveType="0" start="32" end="1e200" {bad}/>'
+            data = self.project(self.write("t.song", song=song_xml(tempos=tempos)))
+            self.assertEqual(self.values(data, "tempo"), [], bad)
+            self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0.0, "bpm": 120.0}]], bad)
+            self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "tempo" in item["message"]
+                                for item in data["diagnostics"]), bad)
+        for numerator, denominator in (("1e300", "4"), ("3", "3"), ("0", "4"), ("3", "0"), ("2.5", "4"), ("3", "256")):
+            meters = ONE_METER + (f'<TimeSignatureMapSegment start="32" numerator="{numerator}" denominator="{denominator}"/>')
+            data = self.project(self.write("m.song", song=song_xml(meters=meters)))
+            self.assertEqual(self.values(data, "meter"), [], (numerator, denominator))
+            self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "signature" in item["message"]
+                                for item in data["diagnostics"]), (numerator, denominator))
+
+    def test_empty_insert_slots_folders_and_empty_names(self):
+        mixer = MIXER_XML.replace('<Attributes x:id="Presets" pname="default"/>',
+                                  '<Attributes name="FX02"/><Attributes name="FX03"><Attributes x:id="deviceData"/></Attributes>')
+        song = song_xml().replace('<MediaTrack mediaType="Music" name="Keys">', '<MediaTrack mediaType="Music" name="">')
+        data = self.project(self.write(song=song, **{"Devices/audiomixer.xml": mixer}))
+        self.assertEqual([item["value"]["name"] for item in self.items(data, "project.plugin")],
+                         ["Pro EQ", "Limiter", "Room Reverb"])
+        tracks = {item["value"]["index"]: item["value"] for item in self.items(data, "project.track")}
+        self.assertEqual((tracks[1]["name"], tracks[2]["kind"]), (None, "folder"))
 
 
 def cm(value, bom=False):
