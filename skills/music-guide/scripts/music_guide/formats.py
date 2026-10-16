@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import ableton, ardour, cubase, dawproject, flstudio, lmms, logic, midi, reaper, solna, studioone
+from .adapters import (aaf, ableton, ardour, cubase, dawproject, flstudio, lmms, logic, midi, musescore,
+                       musicxml, reaper, solna, studioone)
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -41,6 +42,21 @@ def _signature(*prefixes: bytes, text: bool = False) -> Callable[[Path], bool]:
     return detect
 
 
+PRO_TOOLS_BITCODE = b"0010111100101011"
+PRO_TOOLS_SNIFF_BYTES = 0x100
+
+
+def _pro_tools_session(path: Path) -> bool:
+    # ptformat (the reverse-engineered reader for Pro Tools 5 to 12 sessions) accepts a file whose first byte is
+    # 0x03 or whose first 0x100 bytes hold this bit string at offset 1. It only covers .ptf and .ptx, so any
+    # other extension of this format (.pts) is accepted without a signature.
+    if path.suffix.lower() not in {".ptf", ".ptx"}:
+        return True
+    with path.open("rb") as stream:
+        head = stream.read(PRO_TOOLS_SNIFF_BYTES)
+    return head[:1] == b"\x03" or head.find(PRO_TOOLS_BITCODE) == 1
+
+
 ZIP = b"PK\x03\x04"
 COMPOUND_FILE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 GENERIC_GUIDANCE = "Export a mixdown and, if available, MIDI or DAWproject metadata."
@@ -52,7 +68,8 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   midi.midi, ""),
     ProjectFormat("solna", "SOLNA project", (".solna",), "file", MAX_JSON_BYTES, _signature(b"{", text=True),
                   solna.solna, ""),
-    ProjectFormat("pro-tools-session", "Pro Tools session", (".ptx", ".ptf", ".pts"), "file", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("pro-tools-session", "Pro Tools session", (".ptx", ".ptf", ".pts"), "file", MAX_ZIP_BYTES,
+                  _pro_tools_session, None,
                   "Export the session as AAF, or bounce a mixdown and stems; export MIDI tracks as a MIDI file."),
     ProjectFormat("bitwig-project", "Bitwig Studio project", (".bwproject",), "file", MAX_ZIP_BYTES, _any, None,
                   "In Bitwig Studio use File > Export > DAWproject and pass the .dawproject file."),
@@ -81,15 +98,15 @@ FORMATS: tuple[ProjectFormat, ...] = (
     ProjectFormat("lmms-project", "LMMS project", (".mmp", ".mmpz"), "file", lmms.MAX_LMMS_BYTES, lmms.detect, lmms.lmms,
                   "Export a WAV mixdown with File > Export and the tracks with File > Export MIDI."),
     ProjectFormat("aaf", "AAF interchange file", (".aaf",), "file", MAX_ZIP_BYTES,
-                  _signature(COMPOUND_FILE, b"<", text=True), None,
+                  _signature(COMPOUND_FILE, b"<", text=True), aaf.aaf,
                   "Export a mixdown and stems, or a DAWproject or MIDI file if the source application supports it."),
     ProjectFormat("omf", "OMF interchange file", (".omf",), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a mixdown and stems, or a DAWproject or MIDI file if the source application supports it."),
     ProjectFormat("musicxml", "MusicXML score", (".musicxml", ".mxl"), "file", MAX_ZIP_BYTES,
-                  _signature(ZIP, b"<", text=True), None,
-                  "Export the score as a MIDI file, and as audio for the rendered sound."),
-    ProjectFormat("musescore-mscz", "MuseScore score", (".mscz",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
-                  "Export the score as a MIDI file, and as audio for the rendered sound."),
+                  _signature(ZIP, b"<", text=True),
+                  musicxml.musicxml, "Export the score as a MIDI file, and as audio for the rendered sound."),
+    ProjectFormat("musescore-mscz", "MuseScore score", (".mscz",), "file", MAX_ZIP_BYTES, _signature(ZIP),
+                  musescore.musescore, "Export the score as a MIDI file, and as audio for the rendered sound."),
 )
 BY_NAME = {item.name: item for item in FORMATS}
 assert len(BY_NAME) == len(FORMATS), "format names must be unique"

@@ -504,14 +504,11 @@ class MusicGuideTest(unittest.TestCase):
         zipped = zip_bytes.read_bytes()
         inventory = [
             ("song.ptx", b"\x03\x00anything", "pro-tools-session", "AAF"),
-            ("song.PTF", b"x", "pro-tools-session", "AAF"),
+            ("song.PTF", b"\x00" + b"0010111100101011", "pro-tools-session", "AAF"),
+            ("song.pts", b"x", "pro-tools-session", "AAF"),
             ("song.bwproject", b"BtWg", "bitwig-project", "File > Export > DAWproject"),
             ("song.reason", b"x", "reason-song", "MIDI"),
-            ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
             ("song.omf", b"x", "omf", "mixdown"),
-            ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
-            ("score.mxl", zipped, "musicxml", "MIDI"),
-            ("score.mscz", zipped, "musescore-mscz", "MIDI"),
         ]
         for name, content, adapter, hint in inventory:
             with self.subTest(name=name):
