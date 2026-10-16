@@ -365,7 +365,7 @@ def _emit_metadata(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
                      "Stored media attribute record, parsed from its length-prefixed fields.")
     def plausible(name: str, bounds: tuple[float, float]) -> float | None:
         value = by_id.get(name)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
             return None
         number = float(value)
         if bounds[0] <= number <= bounds[1]:

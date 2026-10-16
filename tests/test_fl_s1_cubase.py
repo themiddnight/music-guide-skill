@@ -721,7 +721,9 @@ class CubaseTest(ProjectCliTest):
 
     def test_implausible_tempo_and_sample_rate_are_reported_not_mapped(self):
         for name, kwargs, fragment in (("tempo", dict(tempo=1e12), "MusicalTempo"), ("fast", dict(tempo=5000.0), "MusicalTempo"),
-                                       ("rate", dict(rate=1e12), "AudioSampleRate"), ("slow", dict(rate=3.0), "AudioSampleRate")):
+                                       ("rate", dict(rate=1e12), "AudioSampleRate"), ("slow", dict(rate=3.0), "AudioSampleRate"),
+                                       ("zero-tempo", dict(tempo=0.0), "MusicalTempo"), ("negative-tempo", dict(tempo=-120.0), "MusicalTempo"),
+                                       ("zero-rate", dict(rate=0.0), "AudioSampleRate"), ("negative-rate", dict(rate=-44100.0), "AudioSampleRate")):
             with self.subTest(name=name):
                 data = self.project(self.write(f"{name}.cpr", meta=metadata(**kwargs)))
                 self.assertEqual(self.values(data, "tempo") if "tempo" in kwargs else self.values(data, "project.sample_rate"), [])
