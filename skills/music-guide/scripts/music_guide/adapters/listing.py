@@ -21,3 +21,8 @@ def capped(items: Sequence[T], what: str, source_id: str, evidence: Evidence, li
         return items
     evidence.diagnostics.append(truncation(what, limit, len(items), source_id))
     return items[:limit]
+
+
+def limit_reached(what: str, limit: int, source_id: str) -> Diagnostic:
+    return Diagnostic("project_list_truncated", "warning",
+                      f"Reported the first {limit} {what}; the rest were not listed.", source_id)

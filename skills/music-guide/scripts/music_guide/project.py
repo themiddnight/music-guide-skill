@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence, get_args
 
 from .adapters.common import _finite_number, _media_basename
+from .adapters.listing import MAX_LISTED, MAX_NOTE_LISTING, limit_reached
 from .model import Confidence, Detail, Evidence
 from .notes import Note, summarize_notes
 
@@ -14,6 +15,15 @@ TrackKind = Literal["audio", "midi", "instrument", "group", "return", "master", 
 TRACK_KINDS = frozenset(get_args(TrackKind))
 PositionUnit = Literal["beats", "seconds"]
 TIME_DOMAINS: dict[str, str] = {"beats": "project_beats", "seconds": "project_seconds"}
+
+
+# Properties that repeat once per item of the file. A hostile file could list them without end, so each gets a cap.
+LISTED_PROPERTIES = {"project.track": "tracks", "project.plugin": "plugins", "project.marker": "markers",
+                     "project.media_reference": "media references", "project.note": "notes"}
+
+
+def _list_limit(property: str) -> int:
+    return MAX_NOTE_LISTING if property == "project.note" else MAX_LISTED
 
 
 def _count(value: int, label: str) -> int:
@@ -36,9 +46,17 @@ class ProjectFacts:
     detail: Detail
     # Scope of facts that are not about one track, e.g. "alternative:000" for a package that stores several arrangements.
     scope: str = "project"
+    _seen: Counter = field(default_factory=Counter, init=False, repr=False, compare=False)
 
     def _add(self, property: str, value: Any, unit: str, locator: str, reason: str, *,
              scope: str | None = None, time_domain: str = "static", confidence: Confidence = "high") -> None:
+        if property in LISTED_PROPERTIES:
+            self._seen[property] += 1
+            limit = _list_limit(property)
+            if self._seen[property] > limit:
+                if self._seen[property] == limit + 1:
+                    self.evidence.diagnostics.append(limit_reached(LISTED_PROPERTIES[property], limit, self.source_id))
+                return
         self.evidence.add(self.source_id, property, value, unit, self.scope if scope is None else scope, time_domain, locator,
                           self.method, "extracted", confidence, reason)
 

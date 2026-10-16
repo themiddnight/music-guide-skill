@@ -1,4 +1,5 @@
 from __future__ import annotations
+import io
 import json
 import math
 import re
@@ -21,6 +22,9 @@ MAX_ZIP_ENTRIES = 16384
 MAX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_AUDIO_BYTES = 4 * 1024 * 1024 * 1024
+# A tree costs memory per element however small the file is, so the shape is bounded as well as the bytes.
+MAX_XML_ELEMENTS = 2_000_000
+MAX_XML_DEPTH = 256
 
 
 def _read_bounded(path: Path, limit: int) -> bytes:
@@ -132,9 +136,26 @@ def _read_zip_member(path: Path, member: str, limit: int, *, max_entries: int = 
 
 def _parse_xml(raw: bytes) -> Element:
     try:
-        return DefusedET.fromstring(raw, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+        events = DefusedET.iterparse(io.BytesIO(raw), events=("start", "end"), forbid_dtd=True, forbid_entities=True,
+                                     forbid_external=True)
+        root: Element | None = None
+        depth = count = 0
+        for event, element in events:
+            if event == "end":
+                depth -= 1
+                continue
+            root = element if root is None else root
+            depth += 1
+            count += 1
+            if depth > MAX_XML_DEPTH:
+                raise ValueError(f"XML is nested deeper than {MAX_XML_DEPTH} levels")
+            if count > MAX_XML_ELEMENTS:
+                raise ValueError(f"XML has more than {MAX_XML_ELEMENTS} elements")
     except (DefusedET.ParseError, DefusedXmlException, LookupError) as error:
         raise ValueError(f"unsafe or malformed XML: {error}") from error
+    if root is None:
+        raise ValueError("unsafe or malformed XML: no root element")
+    return root
 
 
 def _local(tag: str) -> str:

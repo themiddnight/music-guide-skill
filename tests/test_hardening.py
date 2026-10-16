@@ -445,5 +445,67 @@ class ZipLimitTest(CliCase):
             _read_zip_member(zip64(MAX_CENTRAL_DIRECTORY_BYTES + 1), "project.xml", 1024)
 
 
+class ObservationCapTest(CliCase):
+    def test_project_facts_cap_each_repeating_property_with_one_warning(self):
+        from music_guide.model import Evidence
+        from music_guide.project import ProjectFacts
+        cases = {
+            "project.plugin": lambda facts, n: facts.plugin(f"P{n}", None, "loc"),
+            "project.marker": lambda facts, n: facts.marker(f"M{n}", float(n), "beats", "loc"),
+            "project.track": lambda facts, n: facts.track(n, f"T{n}", "audio", "loc"),
+            "project.media_reference": lambda facts, n: facts.media_references([f"/x/{n}.wav"], "loc"),
+        }
+        for property, add in cases.items():
+            with self.subTest(property=property):
+                evidence = Evidence()
+                facts = ProjectFacts(evidence, "s1", "test", "summary")
+                for number in range(5200):
+                    add(facts, number)
+                self.assertEqual(sum(item.property == property for item in evidence.observations), 5000)
+                warnings = [item for item in evidence.diagnostics if item.code == "project_list_truncated"]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(property.split(".")[1].replace("_", " "), warnings[0].message)
+
+    def test_full_detail_note_listing_is_capped_on_project_facts(self):
+        from music_guide import project
+        from music_guide.model import Evidence
+        from music_guide.notes import Note
+        evidence = Evidence()
+        facts = project.ProjectFacts(evidence, "s1", "test", "full")
+        notes = [Note(60 + n % 12, 64, float(n), n + 1.0) for n in range(30)]
+        with mock.patch.object(project, "MAX_NOTE_LISTING", 12):
+            facts.track_notes(0, notes, "loc")
+        self.assertEqual(sum(item.property == "project.note" for item in evidence.observations), 12)
+        summary = next(item for item in evidence.observations if item.property == "project.track_notes")
+        self.assertEqual(summary.value["noteCount"], 30)
+        self.assertEqual(sum(item.code == "project_list_truncated" for item in evidence.diagnostics), 1)
+
+
+class XmlShapeTest(CliCase):
+    def test_deep_nesting_is_refused(self):
+        from music_guide.adapters.common import MAX_XML_DEPTH, _parse_xml
+        shallow = b"<a>" * (MAX_XML_DEPTH - 1) + b"</a>" * (MAX_XML_DEPTH - 1)
+        self.assertEqual(_parse_xml(shallow).tag, "a")
+        with self.assertRaisesRegex(ValueError, "nested"):
+            _parse_xml(b"<a>" * (MAX_XML_DEPTH + 1) + b"</a>" * (MAX_XML_DEPTH + 1))
+
+    def test_element_count_is_refused_before_the_tree_grows(self):
+        from music_guide.adapters import common
+        with mock.patch.object(common, "MAX_XML_ELEMENTS", 100):
+            self.assertEqual(len(common._parse_xml(b"<r>" + b"<a/>" * 98 + b"</r>")), 98)
+            with self.assertRaisesRegex(ValueError, "elements"):
+                common._parse_xml(b"<r>" + b"<a/>" * 100 + b"</r>")
+
+    def test_parser_still_rejects_doctype_entities_and_truncation(self):
+        from music_guide.adapters.common import _parse_xml
+        for raw in (b'<!DOCTYPE a [<!ENTITY x "y">]><a>&x;</a>', b"<a><b></a>", b"", b"<a>"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                _parse_xml(raw)
+
+    def test_deeply_nested_project_becomes_a_source_error(self):
+        nested = self.write("deep.musicxml", "<score-partwise>" + "<a>" * 400 + "</a>" * 400 + "</score-partwise>")
+        self.assert_optional_error(self.evidence("--project", nested))
+
+
 if __name__ == "__main__":
     unittest.main()
