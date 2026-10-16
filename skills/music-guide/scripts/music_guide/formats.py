@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from .adapters import dawproject, midi, solna
-from .adapters import flstudio
+from .adapters import flstudio, studioone
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -72,7 +72,8 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Render a mixdown and stems, and export MIDI items as MIDI files."),
     ProjectFormat("fl-studio-flp", "FL Studio project", (".flp",), "file", MAX_ZIP_BYTES, flstudio.detect, flstudio.flstudio,
                   "Export a WAV mixdown and stems, and use File > Export > MIDI file."),
-    ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
+    ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, studioone.detect,
+                  studioone.studioone,
                   "Export a DAWproject (Studio One 6.5 or later), or a mixdown, stems and MIDI."),
     ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", MAX_ZIP_BYTES, _signature(b"<", text=True), None,
                   "Export a mixdown and stems with Session > Export, and MIDI regions as MIDI files."),

@@ -18,7 +18,7 @@ SKILL = ROOT / "skills" / "music-guide"
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 sys.path.insert(0, str(SKILL / "scripts"))
 
-from music_guide.adapters import flstudio  # noqa: E402
+from music_guide.adapters import flstudio, studioone  # noqa: E402
 
 
 class ProjectCliTest(unittest.TestCase):
@@ -243,6 +243,168 @@ class FlStudioTest(ProjectCliTest):
         self.assertTrue(flstudio.detect(path))
         path.write_bytes(path.read_bytes()[:14] + b"XXXX" + path.read_bytes()[18:])
         self.assertFalse(flstudio.detect(path))
+
+
+SONG_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<Song{ns}>
+  <Attributes x:id="Root" defaultTimeFormat="2" length="316">
+    <Attributes x:id="timeContext" sampleRate="44100">
+      <TempoMap x:id="tempoMap">{tempos}</TempoMap>
+      <TimeSignatureMap x:id="timeSignatureMap">{meters}</TimeSignatureMap>
+      <List x:id="keySignatureMap"><KeySignatureMapSegment start="0" root="9" scale="minor"/></List>
+    </Attributes>
+    <List x:id="Tracks">
+      <MarkerTrack name="Marker">
+        <MarkerEvent markerType="2" timeFormat="2" name="Start"/>
+        <MarkerEvent start="16" timeFormat="2" name="Chorus"/>
+        <MarkerEvent start="8" timeFormat="1" name="Seconds"/>
+      </MarkerTrack>
+      <MediaTrack mediaType="Audio" name="Vox" trackID="{{TR-VOX}}" activeLayer="1" timeFormat="2">
+        <UID x:id="channelID" uid="{{CH-VOX}}"/>
+        <List x:id="Layers">
+          <Attributes id="0" layerName="Take 1"><List x:id="Events">
+            <AudioEvent clipID="{{CLIP-1}}" start="4" length="8"/><AudioEvent clipID="{{CLIP-1}}" start="20" length="2"/>
+          </List></Attributes>
+          <Attributes id="1" layerName="Take 2"><List x:id="Events"><AudioEvent clipID="{{CLIP-2}}" start="34" length="3"/></List></Attributes>
+        </List>
+      </MediaTrack>
+      <MediaTrack mediaType="Music" name="Keys"><List x:id="Events"><MusicPart clipID="{{CLIP-M}}" start="4" length="8"/></List></MediaTrack>
+      <FolderTrack name="Group"/>
+      <ArrangerTrack timeFormat="2"><SectionEvent start="0" length="16" name="Verse"/></ArrangerTrack>
+    </List>
+  </Attributes>
+</Song>"""
+ONE_TEMPO = '<TempoMapSegment curveType="0" start="0" end="1e200" tempo="0.5"/>'
+TWO_TEMPOS = ('<TempoMapSegment curveType="0" start="0" end="32" tempo="0.5"/>'
+              '<TempoMapSegment curveType="1" start="32" end="1e200" tempo="1"/>')
+ONE_METER = '<TimeSignatureMapSegment start="0" numerator="3" denominator="4"/>'
+TWO_METERS = ONE_METER + '<TimeSignatureMapSegment start="32" numerator="7" denominator="8"/>'
+META_XML = """<MetaInformation>
+  <Attribute id="Document:Title" value="Fixture Song"/>
+  <Attribute id="Document:Generator" value="Studio One/5.5.2.86528"/>
+  <Attribute id="Media:SampleRate" value="48000"/>
+  <Attribute id="Media:KeySignature" value="A minor"/>
+  <Attribute id="Media:Mystery" value="42"/>
+</MetaInformation>"""
+MEDIA_XML = """<MediaPool><Attributes x:id="rootFolder"><MediaFolder name="Audio">
+  <AudioClip mediaID="{CLIP-1}"><Url x:id="path" type="1" url="file:///tmp/secret/Media/Vox%201.wav"/></AudioClip>
+  <AudioClip mediaID="{CLIP-2}"><Url x:id="path" type="1" url="file:///C:/Users/me/Media/Vox 2.wav"/></AudioClip>
+  <MusicClip mediaID="{CLIP-M}"><Url x:id="dataPath" type="1" url="media:///Performances/Keys/Keys(0).musicx"/></MusicClip>
+</MediaFolder></Attributes></MediaPool>"""
+MIXER_XML = """<AudioMixer><Attributes x:id="channels">
+  <ChannelGroup name="AudioTrack">
+    <AudioTrackChannel label="Vox"><UID x:id="uniqueID" uid="{CH-VOX}"/>
+      <Attributes x:id="Inserts">
+        <Attributes name="FX01"><Attributes x:id="deviceData" name="Pro EQ"/></Attributes>
+        <Attributes x:id="Presets" pname="default"/>
+      </Attributes>
+      <Attributes x:id="PostFaderInserts"><Attributes name="FX01"><Attributes x:id="ghostData"><Attributes x:id="classInfo" name="Limiter"/></Attributes></Attributes></Attributes>
+    </AudioTrackChannel>
+  </ChannelGroup>
+  <ChannelGroup name="FxChannel"><FxChannel label="Verb"><Attributes x:id="Inserts"><Attributes name="FX01"><Attributes x:id="deviceData" name="Room Reverb"/></Attributes></Attributes></FxChannel></ChannelGroup>
+</Attributes></AudioMixer>"""
+
+
+def song_xml(declare=True, tempos=ONE_TEMPO, meters=ONE_METER):
+    return SONG_XML.format(ns=' xmlns:x="urn:presonus"' if declare else "", tempos=tempos, meters=meters)
+
+
+class StudioOneTest(ProjectCliTest):
+    def write(self, name="song.song", song=None, **parts):
+        files = {"Song/song.xml": song or song_xml(), "metainfo.xml": META_XML, "Song/mediapool.xml": MEDIA_XML,
+                 "Devices/audiomixer.xml": MIXER_XML} | parts
+        path = self.dir / name
+        with zipfile.ZipFile(path, "w") as archive:
+            for member, content in files.items():
+                if content is not None:
+                    archive.writestr(member, content)
+        return path
+
+    def test_project_facts_from_a_declared_namespace_song(self):
+        data = self.project(self.write())
+        self.assertEqual((data["sources"][0]["adapter"], data["sources"][0]["status"]), ("studio-one-song", "ok"))
+        self.assertEqual(self.values(data, "project.application"), ["Studio One 5.5.2.86528"])
+        tempo = self.items(data, "tempo")[0]
+        self.assertEqual((tempo["value"], tempo["unit"], tempo["scope"]), (120.0, "BPM", "project"))
+        self.assertEqual(self.values(data, "meter"), ["3/4"])
+        self.assertEqual(sorted(item["locator"] for item in self.items(data, "project.sample_rate")),
+                         ["Song/song.xml timeContext/@sampleRate", "metainfo.xml Media:SampleRate"])
+        self.assertEqual(self.values(data, "project.key"), ["A minor"])
+        self.assertEqual(self.values(data, "project.track_count"), [3])
+        self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
+            "project_track:0": {"name": "Vox", "kind": "audio", "index": 0},
+            "project_track:1": {"name": "Keys", "kind": "instrument", "index": 1},
+            "project_track:2": {"name": "Group", "kind": "unknown", "index": 2}})
+        self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.clip_count")},
+                         {"project_track:0": 1, "project_track:1": 1, "project_track:2": 0})
+        self.assertEqual([(item["value"]["name"], item["scope"]) for item in self.items(data, "project.plugin")],
+                         [("Pro EQ", "project_track:0"), ("Limiter", "project_track:0"), ("Room Reverb", "project")])
+        self.assertEqual(sorted(item["value"]["basename"] for item in self.items(data, "project.media_reference")),
+                         ["Vox 1.wav", "Vox 2.wav"])
+        self.assertEqual([item["value"] for item in self.items(data, "project.marker")],
+                         [{"name": "Start", "position": 0.0, "unit": "beats"},
+                          {"name": "Chorus", "position": 16.0, "unit": "beats"}])
+        self.assertEqual(self.values(data, "studioone.arranger_section"),
+                         [{"name": "Verse", "startBeat": 0.0, "lengthBeats": 16.0}])
+        self.assertEqual(self.values(data, "studioone.key_signature_map"), [[{"beat": 0.0, "root": "9", "scale": "minor"}]])
+        self.assertTrue(any(item["code"] == "studioone_time_format" for item in data["diagnostics"]))
+        serialized = json.dumps(data)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("C:/Users", serialized)
+
+    def test_unconfirmed_metadata_is_recorded_literally_never_mapped(self):
+        data = self.project(self.write())
+        metainfo = {item["value"]["id"]: item["value"]["value"] for item in self.items(data, "studioone.metainfo")}
+        self.assertEqual(metainfo["Media:Mystery"], "42")
+        self.assertEqual(metainfo["Document:Title"], "Fixture Song")
+        self.assertEqual({item["property"] for item in data["observations"]} & {"42"}, set())
+        data = self.project(self.write("none.song", **{"metainfo.xml": None}))
+        self.assertTrue(any(item["code"] == "studioone_part_missing" and "metainfo.xml" in item["message"]
+                            for item in data["diagnostics"]))
+        self.assertEqual(self.values(data, "project.application"), [])
+        self.assertEqual(len(self.values(data, "tempo")), 1)
+
+    def test_tempo_and_meter_maps_make_no_static_claim(self):
+        data = self.project(self.write(song=song_xml(tempos=TWO_TEMPOS, meters=TWO_METERS)))
+        self.assertEqual(self.values(data, "tempo"), [])
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0.0, "bpm": 120.0}, {"beat": 32.0, "bpm": 60.0}]])
+        self.assertEqual(self.values(data, "studioone.meter_map"), [[{"beat": 0.0, "numerator": 3, "denominator": 4},
+                                                                     {"beat": 32.0, "numerator": 7, "denominator": 8}]])
+        self.assertTrue(any(item["code"] == "studioone_tempo_ramps" for item in data["diagnostics"]))
+
+    def test_undeclared_prefix_song_parses_and_conflicts_with_declaration(self):
+        data = self.project(self.write(song=song_xml(declare=False)), "--declarations", self.declare_tempo(100))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
+        self.assertEqual(self.values(data, "project.track_count"), [3])
+        self.assertEqual(self.project(self.write(song=song_xml(declare=False)), "--declarations",
+                                      self.declare_tempo(120))["conflicts"], [])
+
+    def test_rejects_malformed_and_unsafe_archives(self):
+        self.assert_rejected(self.write("no-song.song", **{"Song/song.xml": None}), "does not match")
+        self.assert_rejected(self.write("bad-root.song", song="<Other/>"), "root must be Song")
+        self.assert_rejected(self.write("dtd.song", song='<!DOCTYPE Song [<!ENTITY x "bad">]><Song>&x;</Song>'),
+                             "unsafe or malformed XML")
+        self.assert_rejected(self.write("broken.song", song="<Song><Attributes></Song>"), "malformed XML")
+        (self.dir / "text.song").write_text("not a zip")
+        self.assert_rejected(self.dir / "text.song", "does not match")
+        many = self.dir / "many.song"
+        with zipfile.ZipFile(many, "w") as archive:
+            archive.writestr("Song/song.xml", song_xml())
+            for index in range(studioone.MAX_ENTRIES):
+                archive.writestr(f"Envelopes/{index}.envelopex", b"")
+        self.assert_rejected(many, "does not match")
+        with zipfile.ZipFile(self.dir / "big.song", "w") as archive:
+            archive.writestr("Song/song.xml", "<Song>" + " " * (8 * 1024 * 1024) + "</Song>")
+        self.assert_rejected(self.dir / "big.song", "bounded Song/song.xml")
+
+    def test_unreadable_optional_parts_keep_the_song(self):
+        data = self.project(self.write(**{"Song/mediapool.xml": "<MediaPool", "Devices/audiomixer.xml": "<a><b></a>"}))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "project.media_reference"), [])
+        self.assertEqual(len([item for item in data["diagnostics"] if item["code"] == "studioone_part_unreadable"]), 2)
+        self.assertEqual(len(self.values(data, "project.track")), 3)
 
 
 if __name__ == "__main__":
