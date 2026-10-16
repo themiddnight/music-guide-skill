@@ -20,7 +20,7 @@ from .model import Detail, Diagnostic, Evidence, Source, detect_conflicts
 
 AUDIO_ROLES = ("mixdown", "stem")
 # Explicit flags name their format, so their files skip extension and signature detection.
-FLAG_FORMATS = {"midi": "midi", "solna": "solna", "dawproject": "dawproject"}
+FLAG_FORMATS = ("midi", "solna", "dawproject")
 
 
 def _hash(path: Path) -> str:
@@ -107,7 +107,7 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
                 audio.audio(path, source_id, staged, scope="mixdown" if role == "mixdown" else f"stem:{source_id}")
                 _merge(evidence, staged)
                 continue
-            fmt = formats.BY_NAME[FLAG_FORMATS[role]] if role in FLAG_FORMATS else formats.resolve(path)
+            fmt = formats.BY_NAME[role] if role in FLAG_FORMATS else formats.resolve(path)
             if fmt is not None:
                 source.adapter = fmt.name
             if fmt is None or fmt.adapter is None:
