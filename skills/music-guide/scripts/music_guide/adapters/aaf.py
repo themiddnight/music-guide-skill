@@ -68,12 +68,17 @@ def _resident_bytes(ps: str, pid: int) -> int | None:
 
 
 class _Reader(threading.Thread):
-    """Drains one child pipe without holding more than `limit` bytes."""
+    """Drains one child pipe without holding more than `limit` bytes.
 
-    def __init__(self, stream: Any, limit: int) -> None:
+    Past the limit it either stops (`drain` False, for output the caller rejects) or keeps reading and discards, so a
+    chatty child never blocks on a full pipe.
+    """
+
+    def __init__(self, stream: Any, limit: int, drain: bool = False) -> None:
         super().__init__(daemon=True)
         self.stream = stream
         self.limit = limit
+        self.drain = drain
         self.data = bytearray()
         self.overflow = False
 
@@ -82,7 +87,9 @@ class _Reader(threading.Thread):
             if len(self.data) + len(chunk) > self.limit:
                 self.overflow = True
                 self.data += chunk[:max(0, self.limit - len(self.data))]
-                return
+                if not self.drain:
+                    return
+                continue
             self.data += chunk
 
 
@@ -103,7 +110,7 @@ def _run_child(path: Path, source_id: str, detail: Detail, timeout: float, memor
                 child.stdin.close()
             except OSError:
                 pass  # the child already ended; its exit status is reported below
-            out, err = _Reader(child.stdout, CHILD_OUTPUT_BYTES), _Reader(child.stderr, STDERR_BYTES)
+            out, err = _Reader(child.stdout, CHILD_OUTPUT_BYTES), _Reader(child.stderr, STDERR_BYTES, drain=True)
             out.start()
             err.start()
             next_memory_check = started

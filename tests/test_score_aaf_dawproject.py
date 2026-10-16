@@ -661,6 +661,16 @@ class AafTest(ScoreCase):
         self.assertTrue(reader.overflow)
         self.assertEqual(len(reader.data), 1000)
 
+    def test_stderr_is_drained_past_its_limit_so_a_chatty_child_finishes(self):
+        chatty = ("import json, sys; config = json.loads(sys.stdin.buffer.read(1 << 20)); sys.path[:0] = config['paths']; "
+                  "sys.stderr.write('x' * (1 << 20)); sys.stderr.flush(); "
+                  "from music_guide.adapters.aaf_child import main; raise SystemExit(main(config))")
+        started = time.monotonic()
+        with mock.patch.object(aaf_adapter, "CHILD_CODE", chatty):
+            evidence = self.run_adapter(self.make(), timeout_seconds=10)
+        self.assertLess(time.monotonic() - started, 9)
+        self.assertEqual(evidence.observations[0].property, "project.application")
+
     def test_a_missing_memory_monitor_is_reported(self):
         with mock.patch.object(aaf_adapter, "_memory_poller", return_value=None):
             evidence = self.run_adapter(self.make())
