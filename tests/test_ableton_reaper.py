@@ -149,9 +149,14 @@ class AbletonTest(DawBase):
         self.assertEqual([(item["value"]["name"], item["value"]["position"], item["value"]["unit"])
                           for item in self.facts(data, "project.marker")], [("Chorus", 16.0, "beats"), (None, 0.0, "beats")])
         self.assertEqual([(item["scope"], item["value"]["name"]) for item in self.facts(data, "project.plugin")],
-                         [("project_track:0", "Serum"), ("project_track:0", "Compressor2"),
-                          ("project_track:0", "AUDelay"), ("project_track:1", "Valhalla Room"),
-                          ("project_track:3", "Reverb")])
+                         [("project_track:0", "Serum"), ("project_track:0", "AUDelay"),
+                          ("project_track:1", "Valhalla Room")])
+        devices = self.facts(data, "ableton.device")
+        self.assertEqual([(item["scope"], item["value"]) for item in devices],
+                         [("project_track:0", {"name": "Compressor2", "track": 0, "builtin": True}),
+                          ("project_track:3", {"name": "Reverb", "track": 3, "builtin": True})])
+        for item in devices:
+            self.assertIn("Built-in Ableton device element name", item["confidenceReason"])
         self.assertEqual([item["value"] for item in self.facts(data, "project.media_reference")],
                          [{"basename": "vox take.wav", "count": 2}])
         self.assertEqual(self.one(data, "project.clip_count")["value"], 3)
@@ -193,6 +198,15 @@ class AbletonTest(DawBase):
         notes = self.facts(data, "project.note")
         self.assertEqual([(item["value"]["startBeat"], item["value"]["endBeat"]) for item in notes], [(16.0, 17.0)])
         self.assertEqual(self.one(data, "project.track_notes", "project_track:0")["value"]["noteCount"], 1)
+
+    def test_clamped_velocities_are_counted_in_a_diagnostic(self):
+        clip = midi_clip(1, {60: [(0.0, 1.0, 200), (1.0, 1.0, -4), (2.0, 1.0, 100)]}, start=0.0, end=4.0)
+        data = self.evidence("--project", self.write(live_set(midi_track("Pad", clip))), "--detail", "full")
+        self.assertEqual(sorted(item["value"]["velocity"] for item in self.facts(data, "project.note")), [0, 100, 127])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "ableton_velocity_clamped")
+        self.assertIn("2 note", warning["message"])
+        clean = self.evidence("--project", self.write(LIVE_11, "clean.als"))
+        self.assertFalse(any(item["code"] == "ableton_velocity_clamped" for item in clean["diagnostics"]))
 
     def test_clip_without_loop_fields_is_skipped_not_guessed(self):
         clip = midi_clip(1, {60: [(0.0, 1.0, 100)]}, start=0.0, end=4.0, loop=None)
