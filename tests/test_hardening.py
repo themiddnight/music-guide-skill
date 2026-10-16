@@ -740,6 +740,18 @@ class StartupCostTest(CliCase):
         self.assertIn("missing Python module 'scipy'", result.stderr)
         self.assertEqual(len(result.stderr.strip().splitlines()), 1)
 
+    def test_pyaaf2_is_required_only_for_aaf_files(self):
+        script = ("import sys, importlib.util\n"
+                  "real = importlib.util.find_spec\n"
+                  "importlib.util.find_spec = lambda name, *a: None if name == 'aaf2' else real(name, *a)\n"
+                  "import runpy\n"
+                  f"sys.argv = ['analyze.py', '--midi', {str(self.dir / 'a.mid')!r}]\n"
+                  f"runpy.run_path({str(SKILL / 'scripts' / 'analyze.py')!r}, run_name='__main__')\n")
+        self.write("a.mid", smf(END_OF_TRACK))
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("missing Python module", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

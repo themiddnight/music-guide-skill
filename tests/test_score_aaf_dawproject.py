@@ -620,6 +620,19 @@ class AafTest(ScoreCase):
         plain = self.evidence("--project", self.make("plain.aaf"))
         self.assertEqual(plain["sources"][0]["status"], "ok")
 
+    def test_missing_pyaaf2_is_a_source_error_with_install_guidance(self):
+        shim = self.dir / "shim"
+        (shim / "aaf2").mkdir(parents=True)
+        (shim / "aaf2" / "__init__.py").write_text('raise ImportError("No module named aaf2")\n')
+        result = run_subprocess("--mixdown", self.mix, "--project", self.make(), cwd=self.dir,
+                                env={**os.environ, "PYTHONPATH": str(shim)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assert_rejected(data, "pyaaf2 could not be imported", "s2")
+        self.assertIn("requirements.txt", next(item["message"] for item in data["diagnostics"]
+                                               if item["code"] == "optional_source_error"))
+        self.assertTrue(any(item["property"] == "audio.sample_peak" for item in data["observations"]))
+
     def test_child_import_path_drops_the_working_directory_and_relative_entries(self):
         elsewhere = self.dir / "site"
         elsewhere.mkdir()

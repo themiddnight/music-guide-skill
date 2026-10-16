@@ -16,8 +16,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 # Importable module names of requirements.txt. The audio stack loads only when audio is analyzed, so a missing
-# package is found here, before any work, instead of surfacing halfway through a run.
-REQUIRED_MODULES = ("numpy", "soundfile", "scipy", "mido", "defusedxml", "aaf2")
+# package is found here, before any work, instead of surfacing halfway through a run. pyaaf2 is absent on purpose:
+# only an AAF file needs it, and the AAF child reports its absence as a source error.
+REQUIRED_MODULES = ("numpy", "soundfile", "scipy", "mido", "defusedxml")
 
 
 def _missing_module() -> str | None:
