@@ -113,8 +113,9 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
             if fmt is None or fmt.adapter is None:
                 _inventory(path, fmt, source, evidence)
                 continue
-            _require_file(path, fmt.byte_limit)
-            source.sha256 = _hash(path)
+            if fmt.kind == "file":
+                _require_file(path, fmt.byte_limit)
+                source.sha256 = _hash(path)
             staged = Evidence()
             fmt.adapter(path, source_id, staged, detail)
             _merge(evidence, staged)

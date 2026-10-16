@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import dawproject, midi, solna
+from .adapters import dawproject, logic, midi, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -58,9 +58,9 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "In Bitwig Studio use File > Export > DAWproject and pass the .dawproject file."),
     ProjectFormat("reason-song", "Reason song", (".reason",), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a mixdown and stems, and export the sequencer as a MIDI file."),
-    ProjectFormat("logic-package", "Logic Pro project", (".logicx",), "directory", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("logic-package", "Logic Pro project", (".logicx",), "directory", MAX_ZIP_BYTES, _any, logic.logic,
                   "Export a mixdown and stems, and the MIDI regions as a MIDI file."),
-    ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, logic.garageband,
                   "Export the song to disk as WAV or AIFF. GarageBand cannot export MIDI; Logic Pro can open the project to do so."),
     ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown."),

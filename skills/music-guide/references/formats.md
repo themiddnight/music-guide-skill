@@ -23,8 +23,8 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 | Pro Tools | `.ptx`, `.ptf`, `.pts` | Inventory; export AAF or stems and MIDI |
 | Bitwig Studio | `.bwproject` | Inventory; export DAWproject |
 | Reason | `.reason` | Inventory; export stems and MIDI |
-| Logic Pro | `.logicx` directory | Inventory; export stems and MIDI |
-| GarageBand | `.band` directory | Inventory; export audio |
+| Logic Pro | `.logicx` directory | Parsed: metadata plists per alternative; tracks, regions and MIDI need an export |
+| GarageBand | `.band` directory | Parsed when `Alternatives/NNN/MetaData.plist` exists (GarageBand 10.0.3+); older layouts need an audio export |
 | Cubase, Nuendo | `.cpr`, `.npr` | Inventory; export DAWproject (Cubase 14+) or MIDI |
 | Ableton Live | `.als` | Inventory; export stems and MIDI |
 | REAPER | `.rpp` | Inventory; render stems and export MIDI |
@@ -39,6 +39,17 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 Parser bounds live in `scripts/music_guide/adapters/common.py`; each format's byte limit is its row in `scripts/music_guide/formats.py`. The archive parser reads only `project.xml` and rejects DTD, entities, and external references. MIDI tempo and meter events are reported as `midi.tempo_map` and `midi.meter_map` lists of `{tick, beat, ...}` entries. Only when a file has exactly one `set_tempo` event across all tracks, at tick 0, does it also produce a static `tempo` claim (method `midi-constant-tempo`); a single `time_signature` at tick 0 likewise produces a static `meter` claim (method `midi-constant-meter`). A changing or late tempo is never reduced to a static claim, because the SMF default before the first event is not evidence. Compare declarations against such maps by hand. No source can establish rendered sound except the supplied audio samples, and the CLI does not infer timbre or meaning from them.
 
 DAWproject transport tempo requires an explicit `unit="bpm"`. Other units and missing units are rejected rather than guessed. A missing `Structure` produces no track-count claim. An explicitly empty `Structure` has a count of zero. Automatic conflict detection compares shared static tempo and meter claims with matching scopes and units whose provenance is measured, extracted, or user declared. Inferred estimates never raise automatic conflicts. Tempo values within 0.01 BPM count as equal because MIDI stores whole microseconds per beat (92 BPM reads back as 91.99999 BPM). Meter must match exactly. Other properties and event maps require explicit human comparison.
+
+## Logic Pro and GarageBand packages
+
+Sources: the observed `.logicx` layout of Logic Pro 12.4 and the [MultimediaWiki GarageBand page](https://wiki.multimedia.cx/index.php/GarageBand). GarageBand 10.0.3 and later uses the same package layout as Logic Pro.
+
+The adapter reads only `Resources/ProjectInformation.plist` and each `Alternatives/NNN/MetaData.plist`, as XML or binary property lists of at most 4 MiB. It never opens `ProjectData` (undocumented binary), `Media/` files, or any path a plist lists. A symbolic link at any step of a read path rejects the whole package. A package without a readable `MetaData.plist` (older GarageBand, iOS GarageBand) is an error with export guidance.
+
+- `project.application` comes from `LastSavedFrom`. Each alternative is its own scope, `alternative:NNN`, named by `VariantNames` in `logic.alternative_name` (`garageband.*` for `.band`). Compare a declaration against it with the same scope, for example `alternative:000`.
+- `tempo` (`BeatsPerMinute`), `meter` (`SongSignatureNumerator` and `SongSignatureDenominator`), `project.key` (`SongKey` and `SongGenderKey`, joined as "D minor"), `project.sample_rate` and `project.track_count` (`NumberOfTracks`) are stored settings per alternative. The tempo is the project start tempo; a tempo map in `ProjectData` is not read. Logic stores a key even when the user never set one, so treat `project.key` as stored intent. A key with only one half present is reported as `logic.partial_key` instead.
+- `project.media_reference` lists basenames from `AudioFiles`, `UnusedAudioFiles`, `PlaybackFiles`, `SamplerInstrumentsFiles`, `QuicksamplerFiles`, `ImpulsResponsesFiles` and `UltrabeatFiles`; the list name is the end of the locator and `logic.media_list` carries the role and path count. `logic.bundled_media` counts regular files under `Media/` by name only; links are counted but not followed.
+- Not extracted: track names and kinds, regions, MIDI notes, plugins, tempo and meter changes, markers. An info diagnostic `project_data_not_read` says so.
 
 ## Add an adapter
 
