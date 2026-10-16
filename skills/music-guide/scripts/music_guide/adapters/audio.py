@@ -15,6 +15,8 @@ from .common import MAX_AUDIO_BYTES
 
 LOSSY_SUBTYPES = {"MPEG_LAYER_I", "MPEG_LAYER_II", "MPEG_LAYER_III", "VORBIS", "OPUS"}
 BLOCK_FRAMES = 65536
+# +120 dBFS. Real recordings never get near it, and every squared sum stays finite below it.
+MAX_SAMPLE_MAGNITUDE = 1e6
 
 
 @dataclass
@@ -65,7 +67,7 @@ def _measure(file: sf.SoundFile) -> dict:
             raise ValueError("audio contains nonfinite samples")
         absolute = np.abs(block)
         block_peak = float(np.max(absolute))
-        if block_peak > 1e150:
+        if block_peak > MAX_SAMPLE_MAGNITUDE:
             raise ValueError("audio sample magnitude exceeds finite measurement range")
         peak = max(peak, block_peak)
         sum_squares += float(np.sum(block * block))

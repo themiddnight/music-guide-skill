@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -54,6 +55,24 @@ class Diagnostic:
     sourceId: str | None = None
 
 
+MAX_INTEGER_BITS = 1024
+
+
+def _check_finite(property: str, value: Any) -> None:
+    """Reject values the JSON report cannot carry, in nested containers too."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{property} holds a nonfinite number")
+        if isinstance(item, int) and item.bit_length() > MAX_INTEGER_BITS:
+            raise ValueError(f"{property} holds an integer beyond the reportable range")
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+
+
 @dataclass
 class Evidence:
     sources: list[Source] = field(default_factory=list)
@@ -66,6 +85,7 @@ class Evidence:
             scope: str, time_domain: str, locator: str, method: str,
             provenance: Provenance, confidence: Confidence,
             reason: str) -> None:
+        _check_finite(property, value)
         self.observations.append(Observation(
             id=f"o{len(self.observations) + 1}", sourceIds=[source_id],
             property=property, value=value, unit=unit, scope=scope,

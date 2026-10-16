@@ -60,14 +60,21 @@ class SpectrumMeter:
         self.window = signal.windows.hann(size, sym=False)
         self.freqs = np.fft.rfftfreq(size, 1 / rate)
         self.power = np.zeros(len(self.freqs))
+        # `power` is stored relative to `scale` squared, so a very loud or very quiet signal never over- or underflows.
+        self.scale = 0.0
 
     def feed(self, block: np.ndarray) -> None:
         self._add(self.framer.push(block))
 
     def _add(self, frames: np.ndarray) -> None:
-        if frames.size:
-            spectrum = np.fft.rfft(frames * self.window, axis=-1)
-            self.power += np.sum(spectrum.real ** 2 + spectrum.imag ** 2, axis=(0, 1))
+        peak = float(np.max(np.abs(frames))) if frames.size else 0.0
+        if not peak > 0:
+            return
+        if peak > self.scale:
+            self.power *= (self.scale / peak) ** 2
+            self.scale = peak
+        spectrum = np.fft.rfft(frames / peak * self.window, axis=-1)
+        self.power += np.sum(spectrum.real ** 2 + spectrum.imag ** 2, axis=(0, 1)) * (peak / self.scale) ** 2
 
     def result(self) -> tuple[dict | None, float | None]:
         self._add(self.framer.flush())

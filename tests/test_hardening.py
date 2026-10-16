@@ -112,5 +112,41 @@ class PolyphonyTest(CliCase):
         self.assertEqual(self.track_summary(track)["maxPolyphony"], 1)
 
 
+class FiniteValueTest(CliCase):
+    def test_evidence_rejects_nonfinite_values_recursively(self):
+        from music_guide.model import Evidence
+        evidence = Evidence()
+        for value in (float("nan"), {"a": [1, {"b": float("inf")}]}, [float("-inf")], 10 ** 400):
+            with self.subTest(value=str(value)[:20]), self.assertRaises(ValueError):
+                evidence.add("s1", "p", value, "u", "project", "static", "l", "m", "extracted", "high", "r")
+        self.assertEqual(evidence.observations, [])
+
+    def test_nonfinite_adapter_value_becomes_a_source_error(self):
+        import dataclasses
+        from music_guide import cli, formats
+
+        def adapter(path, source_id, evidence, detail):
+            evidence.add(source_id, "ok", 1, "u", "project", "static", "l", "m", "extracted", "high", "r")
+            evidence.add(source_id, "bad", {"x": float("nan")}, "u", "project", "static", "l", "m", "extracted", "high", "r")
+        patched = dataclasses.replace(formats.BY_NAME["solna"], adapter=adapter)
+        with mock.patch.dict(formats.BY_NAME, {"solna": patched}):
+            result = cli.build(self.mix, [("solna", self.write("a.solna", "{}"))], None)
+        self.assertEqual([item.property for item in result.observations if item.sourceIds == ["s2"]], [])
+        self.assertTrue(any(item.code == "optional_source_error" for item in result.diagnostics))
+        json.dumps(result.as_json(), allow_nan=False)
+
+    def test_extreme_audio_amplitude_fails_the_source_not_the_report(self):
+        huge = self.dir / "huge.wav"
+        sf.write(huge, np.full(4096, 1e149), 48000, subtype="DOUBLE")
+        data = self.evidence("--stem", huge)
+        self.assert_optional_error(data)
+        loud = self.dir / "loud.wav"
+        sf.write(loud, np.full(4096, 2e6), 48000, subtype="DOUBLE")
+        self.assert_optional_error(self.evidence("--stem", loud))
+        result = self.run_cli("--mixdown", huge, mixdown=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("magnitude", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
