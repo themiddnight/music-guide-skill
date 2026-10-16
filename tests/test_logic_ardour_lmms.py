@@ -24,9 +24,9 @@ class ProjectCliCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, **options):
         return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+                              cwd=self.dir, text=True, capture_output=True, timeout=120, **options)
 
     def evidence(self, *args):
         result = self.run_cli(*args)
@@ -202,7 +202,11 @@ class LogicPackageTest(ProjectCliCase):
         self.assertIn("symbolic link", self.failed(linked_alt))
         linked_dir = self.make_package("dir.logicx")
         os.symlink(self.dir, linked_dir / "Media")
-        self.assertIn("symbolic link", self.failed(linked_dir))
+        data = self.project(linked_dir)
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(data, "logic.bundled_media"), [])
+        skipped = next(item for item in data["diagnostics"] if item["code"] == "bundled_media_skipped")
+        self.assertIn("symbolic link", skipped["message"])
         inner = self.make_package("inner.logicx")
         media = inner / "Media"
         media.mkdir()
@@ -210,6 +214,31 @@ class LogicPackageTest(ProjectCliCase):
         (media / "kick.wav").write_bytes(b"x")
         data = self.project(inner)
         self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 1, "linksNotFollowed": 1, "truncated": False}])
+
+    def test_named_pipes_are_refused_without_blocking(self):
+        for relative in (("Alternatives", "000", "MetaData.plist"), ("Resources", "ProjectInformation.plist")):
+            with self.subTest(plist=relative[-1]):
+                package = self.make_package(f"fifo-{relative[-1]}.logicx")
+                target = package.joinpath(*relative)
+                target.unlink()
+                os.mkfifo(target)
+                self.assertIn("not a regular file", self.failed(package))
+
+    def test_bundled_media_directories_count_toward_the_walk_cap(self):
+        package = self.make_package()
+        media = package / "Media"
+        media.mkdir()
+        for number in range(50_001):
+            (media / f"d{number}").mkdir()
+        data = self.project(package)
+        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+
+    def test_integral_float_sample_rate_is_accepted(self):
+        data = self.project(self.make_package(meta={"SampleRate": 44100.0}))
+        self.assertEqual(self.values(data, "project.sample_rate"), [44100])
+        for bad in (44100.5, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                self.failed(self.make_package(f"rate-{bad}.logicx", meta={"SampleRate": bad}))
 
 
 LMMS_XML = """<?xml version="1.0"?>

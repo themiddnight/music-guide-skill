@@ -83,8 +83,12 @@ def _read_plist(package: Path, parts: tuple[str, ...]) -> dict[str, Any] | None:
         return None
     target = directory / parts[-1]
     try:
-        _refuse_link(os.lstat(target), relative)
-        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        info = os.lstat(target)
+        _refuse_link(info, relative)
+        # A named pipe or device would block open() forever, so only a regular file is ever opened.
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{relative} is not a regular file")
+        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
         return None
     except OSError as error:
@@ -133,6 +137,8 @@ def _integer(data: dict[str, Any], key: str, minimum: int) -> int | None:
     if key not in data:
         return None
     value = data[key]
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{key} must be an integer of at least {minimum}")
     return value
@@ -159,14 +165,15 @@ def _bundled_media(package: Path) -> dict[str, Any] | None:
     root = _checked_directory(package, ("Media",))
     if root is None:
         return None
-    files = links = 0
+    files = links = seen = 0
     truncated = False
     pending = [(root, 0)]
     while pending and not truncated:
         directory, depth = pending.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
-                if files + links >= MAX_MEDIA_ENTRIES:
+                seen += 1
+                if seen > MAX_MEDIA_ENTRIES:
                     truncated = True
                     break
                 if entry.is_symlink():
@@ -253,7 +260,13 @@ def _package(path: Path, source_id: str, evidence: Evidence, detail: Detail, fla
               if _alternative(path, number, names, flavor, source_id, evidence, detail, scopes[number])]
     if not parsed:
         raise ValueError(f"{path.name} is not a {flavor.label} package with Alternatives/NNN/MetaData.plist. {flavor.guidance}")
-    media = _bundled_media(path)
+    try:
+        media = _bundled_media(path)
+    except (ValueError, OSError) as error:
+        media = None
+        evidence.diagnostics.append(Diagnostic(
+            "bundled_media_skipped", "warning",
+            f"The bundled Media folder was not counted: {error}. The rest of the package was read.", source_id))
     if media is not None:
         evidence.add(source_id, f"{flavor.prefix}.bundled_media", media, "inventory", "project", "static", "Media/",
                      flavor.method, "extracted", "high",
