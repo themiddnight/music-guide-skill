@@ -18,7 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "music-guide"
 sys.path.insert(0, str(SKILL / "scripts"))
 
+from music_guide.adapters.common import _gunzip_bounded, _media_basename, _read_zip_member  # noqa: E402
 from music_guide.model import Evidence, detect_conflicts  # noqa: E402
+from music_guide.notes import Note  # noqa: E402
+from music_guide.project import ProjectFacts  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 DECLARATIONS_SCHEMA = json.loads((SKILL / "schemas" / "declarations.schema.json").read_text())
@@ -137,11 +140,19 @@ class MusicGuideTest(unittest.TestCase):
     def test_dawproject_transport_only_and_xml_safety(self):
         project = self.dir / "song.dawproject"
         with zipfile.ZipFile(project, "w") as archive:
-            archive.writestr("project.xml", '<Project version="1"><Transport><Tempo value="120" unit="bpm"/><TimeSignature numerator="4" denominator="4"/></Transport><Structure><Track name="Drums"/><Track name="Bass"/></Structure><Arrangement><Tempo value="180"/></Arrangement></Project>')
+            archive.writestr("project.xml", '<Project version="1"><Application name="Bitwig Studio" version="5.2"/><Transport><Tempo value="120" unit="bpm"/><TimeSignature numerator="4" denominator="4"/></Transport><Structure><Track name="Drums" contentType="audio"><Channel role="regular"/></Track><Track name="Bass" contentType="notes"/><Track name="FX" contentType="audio"><Channel role="effect"/></Track><Track contentType="audio notes"><Channel role="master"/></Track></Structure><Arrangement><Tempo value="180"/></Arrangement></Project>')
         data = self.evidence("--dawproject", project)
         tempos = [item for item in data["observations"] if item["property"] == "tempo"]
         self.assertEqual([item["value"] for item in tempos], [120])
-        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "dawproject.track_count"), 2)
+        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "project.track_count"), 4)
+        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "project.application"), "Bitwig Studio 5.2")
+        tracks = {item["scope"]: item["value"] for item in data["observations"] if item["property"] == "project.track"}
+        self.assertEqual(tracks, {
+            "project_track:0": {"name": "Drums", "kind": "audio", "index": 0},
+            "project_track:1": {"name": "Bass", "kind": "instrument", "index": 1},
+            "project_track:2": {"name": "FX", "kind": "return", "index": 2},
+            "project_track:3": {"name": None, "kind": "master", "index": 3},
+        })
         with zipfile.ZipFile(project, "w") as archive:
             archive.writestr("project.xml", '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE Project [<!ENTITY x "bad">]><Project/>'.encode("utf-16"))
         data = self.evidence("--dawproject", project)
@@ -226,7 +237,7 @@ class MusicGuideTest(unittest.TestCase):
                 archive.writestr("project.xml", xml)
             with self.subTest(expected=expected):
                 data = self.evidence("--dawproject", project)
-                counts = [item for item in data["observations"] if item["property"] == "dawproject.track_count"]
+                counts = [item for item in data["observations"] if item["property"] == "project.track_count"]
                 if expected == "missing":
                     self.assertEqual(counts, [])
                 elif expected == "empty":
@@ -414,6 +425,74 @@ class MusicGuideTest(unittest.TestCase):
         self.assertEqual(tempo_conflicts(("inferred", 96.0), ("extracted", 120.0), ("user_declared", 120)), [])
         self.assertEqual(tempo_conflicts(("inferred", 96.0), ("measured", 120.0)), [])
         self.assertEqual(len(tempo_conflicts(("inferred", 96.0), ("measured", 120.0), ("extracted", 100))[0].observationIds), 2)
+
+    def test_shared_archive_helpers_refuse_bombs_and_never_keep_paths(self):
+        payload = b"<Project/>" * 1000
+        self.assertEqual(_gunzip_bounded(gzip.compress(payload), len(payload)), payload)
+        bomb = gzip.compress(b"\0" * (4 * 1024 * 1024))
+        self.assertLess(len(bomb), 16 * 1024)
+        for raw in (bomb, gzip.compress(payload)[:-12], b"not gzip"):
+            with self.assertRaises(ValueError):
+                _gunzip_bounded(raw, 1024 * 1024)
+        archive_path = self.dir / "many.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for index in range(300):
+                archive.writestr(f"f{index}.txt", "x")
+        with self.assertRaises(ValueError):
+            _read_zip_member(archive_path, "f1.txt", 1024)
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("song.xml", "<a/>")
+        self.assertEqual(_read_zip_member(archive_path, "song.xml", 1024), b"<a/>")
+        for member, limit in (("missing.xml", 1024), ("song.xml", 2)):
+            with self.assertRaises(ValueError):
+                _read_zip_member(archive_path, member, limit)
+        self.assertEqual([_media_basename(raw) for raw in (
+            "/Users/me/Audio Files/kick.wav", "C:\\Samples\\snare 01.wav", "file:///Users/me/My%20Pad.aif",
+            "../../../etc/passwd", "Samples/loop.wav/", "")],
+            ["kick.wav", "snare 01.wav", "My Pad.aif", "passwd", "loop.wav", ""])
+
+    def test_project_vocabulary_is_uniform_and_detail_aware(self):
+        def record(detail):
+            evidence = Evidence()
+            facts = ProjectFacts(evidence, "s1", "test-xml", detail)
+            facts.application("Example DAW 1.0", "app")
+            facts.tempo(128, "tempo")
+            facts.meter(6, 8, "meter")
+            facts.tempo_map([{"beat": 0, "bpm": 128}, {"beat": 64, "bpm": 140}], "tempo map")
+            facts.sample_rate(48000, "rate")
+            facts.key("F# minor", "key")
+            facts.track_count(2, "tracks")
+            facts.track(0, "Lead", "instrument", "track 0")
+            facts.track(1, "Vox", "audio", "track 1")
+            facts.marker("Chorus", 32, "beats", "marker")
+            facts.plugin("Reverb", 1, "plugin")
+            facts.media_references(["/a/b/vox.wav", "D:\\other\\vox.wav", "/x/kick.wav"], "media")
+            facts.clip_count(3, "clips")
+            facts.track_notes(0, [Note(62, 90, 0, 1, None), Note(66, 70, 1, 1.5, None)], "notes")
+            facts.track_notes(1, [], "notes")
+            payload = evidence.as_json()
+            jsonschema.validate(payload, SCHEMA)
+            return payload["observations"]
+        summary = record("summary")
+        by_property = {}
+        for item in summary:
+            by_property.setdefault(item["property"], []).append(item)
+        self.assertEqual(sorted(by_property), sorted([
+            "project.application", "tempo", "meter", "project.tempo_map", "project.sample_rate", "project.key",
+            "project.track_count", "project.track", "project.marker", "project.plugin",
+            "project.media_reference", "project.clip_count", "project.track_notes"]))
+        self.assertEqual(by_property["meter"][0]["value"], "6/8")
+        self.assertEqual(by_property["project.plugin"][0]["scope"], "project_track:1")
+        self.assertEqual([item["value"] for item in by_property["project.media_reference"]],
+                         [{"basename": "kick.wav", "count": 1}, {"basename": "vox.wav", "count": 2}])
+        notes = by_property["project.track_notes"]
+        self.assertEqual([(item["scope"], item["value"]["noteCount"], item["value"]["pitchMax"]["name"]) for item in notes],
+                         [("project_track:0", 2, "F#4")])
+        self.assertTrue(all(item["provenance"] == "extracted" and item["method"] == "test-xml" for item in summary))
+        full = record("full")
+        self.assertEqual(len([item for item in full if item["property"] == "project.note"]), 2)
+        with self.assertRaises(ValueError):
+            ProjectFacts(Evidence(), "s1", "test", "summary").track(0, "x", "bus", "here")
 
 
 if __name__ == "__main__":
