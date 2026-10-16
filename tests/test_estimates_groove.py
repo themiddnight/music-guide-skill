@@ -27,6 +27,12 @@ class GrooveTest(unittest.TestCase):
     def test_long_rest_does_not_turn_a_phrase_ending_into_syncopation(self):
         self.assertEqual(rhythm.syncopation([0.75, 16, 17, 18, 19], rhythm.Meter(4, 4)), 0)
 
+    def test_cross_bar_anticipation_scores_only_an_empty_downbeat(self):
+        meter = rhythm.Meter(4, 4)
+        self.assertEqual(rhythm.syncopation([3.75, 5, 6, 7, 8], meter), 0.083333)
+        self.assertEqual(rhythm.syncopation([3.75, 4, 5, 6, 7, 8], meter), 0)
+        self.assertEqual(rhythm.syncopation([0.75, 2, 3, 4, 5], meter), 0.0625)
+
     def test_audio_syncopation_matches_rhythm_module(self):
         samples = np.zeros(32 * RATE)
         click = _burst(RATE, None, 0.035, 2)
