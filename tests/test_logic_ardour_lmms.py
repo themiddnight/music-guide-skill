@@ -232,13 +232,22 @@ class LogicPackageTest(ProjectCliCase):
                 self.assertIn("not a regular file", self.failed(package))
 
     def test_bundled_media_directories_count_toward_the_walk_cap(self):
+        # The cap is a module constant, so a patched cap of 50 proves the same rule as 50,000 directories: every
+        # entry, directories included, counts toward it, and the entry that crosses it truncates the walk.
+        self.assertEqual(logic.MAX_MEDIA_ENTRIES, 50_000)
         package = self.make_package()
         media = package / "Media"
         media.mkdir()
-        for number in range(50_001):
+        for number in range(51):
             (media / f"d{number}").mkdir()
-        data = self.project(package)
-        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+        with mock.patch.object(logic, "MAX_MEDIA_ENTRIES", 50):
+            data = self.project(package)
+            self.assertEqual(self.values(data, "logic.bundled_media"),
+                             [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+            (media / "d50").rmdir()
+            data = self.project(package)
+            self.assertEqual(self.values(data, "logic.bundled_media"),
+                             [{"fileCount": 0, "linksNotFollowed": 0, "truncated": False}])
 
     def test_integral_float_sample_rate_is_accepted(self):
         data = self.project(self.make_package(meta={"SampleRate": 44100.0}))
