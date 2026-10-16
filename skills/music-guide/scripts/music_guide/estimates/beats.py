@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from scipy import signal
@@ -40,6 +40,19 @@ METERS = ((2, "2/4"), (3, "3/4"), (4, "4/4"), (6, "6/8"))
 # Share of beat-accent variance a bar must explain beyond chance. Unaccented and randomly jittered click tracks
 # reach at most 0.08; the three reference songs score 0.17 (itipiso) to 0.77 (Winterstory).
 MIN_METER_SCORE = 0.12
+# The chance share's spread falls with beat count, so short files need more. Under a random order of n accents a
+# k-position bar's share is close to Beta((k - 1) / 2, (n - k) / 2), whose standard deviation is largest for 6/8.
+# In simulation the best of the four bars beats chance by 2.25 of that deviation in 5% of random orders, at every n
+# from 24 to 400; the floor rises above MIN_METER_SCORE below about 66 beats.
+METER_NULL_Z = 2.5
+# A bar of 4 or 6 beats repeats the pattern of its half when its two halves match. When the half scores higher but by
+# no more than NEST_MARGIN, the longer bar is read instead if its downbeat leads the mid-bar beat by NEST_LEAD
+# standard errors. Under matching halves that lead reaches 2 in about 5% of files; synthetic 2/4 and 3/4 click
+# tracks of 16 to 60 s reach at most 1.83, and 4/4 or 6/8 with a mid-bar kick at 0.6 of the downbeat's 2.6 to 3.7
+# at 60 s but only 1.2 to 3.0 at 16 to 30 s, where the kick's low-band onset varies with frame alignment.
+NESTED = {4: 2, 6: 3}
+NEST_MARGIN = 0.05
+NEST_LEAD = 2.0
 MIN_SWING_PAIRS = 16
 # An off-beat peak counts toward swing only when it reaches this share of the onset on the beat before it.
 OFFBEAT_SHARE = 0.2
@@ -134,9 +147,12 @@ BEAT_METHOD = Method("ellis-dp-beats",
 METER_METHOD = Method("accent-pattern-meter",
                       "bars of 2, 3, 4 or 6 tracked beats scored by the share of per-beat accent variance (low-band"
                       " onset strength and pitch-class change) that the bar's per-position means explain beyond"
-                      " chance; the downbeat is the position with the strongest mean accent. 2/4 and 4/4, and 3/4"
-                      " and 6/8, differ only by a weaker accent mid-bar, so they are often close; a pickup or an"
-                      " intro without accents can shift the downbeat.")
+                      " chance; the downbeat is the position with the strongest mean accent. Short files need a"
+                      " higher score, because chance alone explains more of fewer beats. 2/4 and 4/4, and 3/4 and"
+                      " 6/8, differ only by a weaker accent mid-bar, so they are often close: when the shorter bar"
+                      f" scores at most {NEST_MARGIN:g} higher and the longer bar's downbeat clearly outweighs its"
+                      " mid-bar beat, the longer bar is listed first and sets the downbeats. A pickup or an intro"
+                      " without accents can shift the downbeat.")
 SWING_METHOD = Method("offbeat-onset-position",
                       "median long-to-short ratio of the strongest onset between consecutive beats, counted only at"
                       " 40-80% of the beat. It skips when the mean onset pattern between beats has two similar peaks,"
@@ -266,6 +282,12 @@ def _contrast(values: np.ndarray) -> np.ndarray:
     return values / mean - 1 if mean > 0 else np.zeros_like(values)
 
 
+def _meter_floor(beats: int) -> float:
+    size = max(size for size, _ in METERS)
+    spread = math.sqrt(2 * (size - 1) * (beats - size) / ((beats - 1) ** 2 * (beats + 1)))
+    return max(MIN_METER_SCORE, METER_NULL_Z * spread)
+
+
 def meter(store: FeatureStore, beats: BeatGrid) -> MeterEstimate | Skip:
     times = beats.times
     if len(times) < MIN_METER_BEATS:
@@ -283,21 +305,48 @@ def meter(store: FeatureStore, beats: BeatGrid) -> MeterEstimate | Skip:
     total = float(np.sum(centred ** 2))
     if not total > 0:
         return Skip("the tracked beats carry no low-band or pitch-class accent, so no bar pattern can be read.")
-    scored = []
-    for size, signature in METERS:
-        position = np.arange(len(accent)) % size
-        counts = np.bincount(position, minlength=size)
-        means = np.bincount(position, weights=centred, minlength=size) / counts
-        explained = float(np.sum(counts * means ** 2)) / total
-        # Under a random order of the same accents a bar of `size` positions explains (size - 1) / (beats - 1) of the
-        # variance on average, so the raw share would favour longer bars.
-        scored.append((round(explained - (size - 1) / (len(accent) - 1), 3), signature, int(np.argmax(means)), size))
-    scored.sort(key=lambda item: -item[0])
-    score, signature, phase, size = scored[0]
-    if score < MIN_METER_SCORE:
-        return Skip(f"no bar pattern stands out: the best, {signature}, explains {score:.2f} of the beat-accent"
-                    f" variance beyond chance, below {MIN_METER_SCORE:g}.")
-    return MeterEstimate(tuple((signature, score) for score, signature, _, _ in scored), phase, times[phase::size])
+    scored = [_bar(centred, total, size, signature) for size, signature in METERS]
+    scored.sort(key=lambda bar: -bar.score)
+    best = scored[0]
+    floor = _meter_floor(len(accent))
+    if best.score < floor:
+        return Skip(f"no bar pattern stands out: the best, {best.signature}, explains {best.score:.2f} of the"
+                    f" beat-accent variance beyond chance, below the {floor:.2f} that {len(accent)} beats need.")
+    for bar in scored:
+        if (NESTED.get(bar.size) == best.size and best.score - bar.score <= NEST_MARGIN
+                and bar.phase % best.size == best.phase and bar.lead >= NEST_LEAD):
+            scored.remove(bar)
+            scored.insert(0, bar)
+            break
+    chosen = scored[0]
+    return MeterEstimate(tuple((bar.signature, bar.score) for bar in scored), chosen.phase,
+                         times[chosen.phase::chosen.size])
+
+
+class _Bar(NamedTuple):
+    score: float
+    signature: str
+    size: int
+    phase: int
+    lead: float  # the downbeat's mean accent over the mid-bar beat's, in standard errors; 0 unless size is NESTED
+
+
+def _bar(centred: np.ndarray, total: float, size: int, signature: str) -> _Bar:
+    beats = len(centred)
+    position = np.arange(beats) % size
+    counts = np.bincount(position, minlength=size)
+    means = np.bincount(position, weights=centred, minlength=size) / counts
+    between = float(np.sum(counts * means ** 2))
+    phase = int(np.argmax(means))
+    lead = 0.0
+    if size in NESTED:
+        middle = (phase + NESTED[size]) % size
+        difference = float(means[phase] - means[middle])
+        error = math.sqrt(max(0.0, total - between) / (beats - size) * (1 / counts[phase] + 1 / counts[middle]))
+        lead = difference / error if error > 0 else (math.inf if difference > 0 else 0.0)
+    # Under a random order of the same accents a bar of `size` positions explains (size - 1) / (beats - 1) of the
+    # variance on average, so the raw share would favour longer bars.
+    return _Bar(round(between / total - (size - 1) / (beats - 1), 3), signature, size, phase, lead)
 
 
 def _sub_beat_peaks(flux: np.ndarray, rate: float, times: np.ndarray) -> list[float]:

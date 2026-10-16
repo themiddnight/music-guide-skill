@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 import tempfile
@@ -138,16 +139,32 @@ class MeterTest(unittest.TestCase):
                 self.assertIsInstance(estimate, Skip)
                 self.assertIn("no bar pattern stands out", estimate.reason)
 
+    def test_short_unaccented_excerpts_rarely_claim_a_meter(self):
+        click = _burst(RATE, None, 0.04, 1)
+        claims = 0
+        for seed in range(40):
+            rng = np.random.default_rng(seed)
+            beats_in_track = 24 + seed % 7
+            samples = np.zeros(int((0.5 * beats_in_track + 1.5) * RATE))
+            for index in range(beats_in_track):
+                start = int((0.5 + 0.5 * index + rng.normal(0, 0.01)) * RATE)
+                samples[start:start + len(click)] += rng.uniform(0.2, 0.4) * click
+            store, grid = grid_of(samples)
+            claims += not isinstance(beats.meter(store, grid), Skip)
+        self.assertLessEqual(claims, 2)
+
     def test_a_weaker_mid_bar_accent_keeps_the_longer_bar(self):
-        # A kick at 0.25 puts the mid-bar low-band accent at about 0.7 of the downbeat's, above the off-beats.
-        for beats_per_bar, secondary, expected, rival in ((4, 2, "4/4", "2/4"), (6, 3, "6/8", "3/4")):
-            with self.subTest(meter=expected):
-                samples, truth, downbeats = click_track(120, beats_per_bar, 60)
+        # A mid-bar kick at 0.25 puts its low-band accent at about 0.7 of the downbeat's. At 0.36, 0.6 of the
+        # downbeat kick's gain, the shorter bar scores as high or higher and the nesting tie-break decides.
+        for (beats_per_bar, secondary, expected, rival), (gain, seconds) in itertools.product(
+                ((4, 2, "4/4", "2/4"), (6, 3, "6/8", "3/4")), ((0.25, 20), (0.25, 60), (0.36, 60))):
+            with self.subTest(meter=expected, gain=gain, seconds=seconds):
+                samples, truth, downbeats = click_track(120, beats_per_bar, seconds)
                 kick = _burst(RATE, 60.0, 0.2, 2)
                 for at in truth[secondary::beats_per_bar]:
                     start = int(round(at * RATE))
                     part = kick[:len(samples) - start]
-                    samples[start:start + len(part)] += 0.25 * part
+                    samples[start:start + len(part)] += gain * part
                 store, grid = grid_of(samples)
                 estimate = beats.meter(store, grid)
                 ranked = [signature for signature, _ in estimate.candidates]
@@ -155,6 +172,13 @@ class MeterTest(unittest.TestCase):
                 self.assertLess(ranked.index(expected), ranked.index(rival))
                 self.assertEqual(estimate.downbeat_phase, 0)
                 self.assertGreaterEqual(np.mean(nearest(downbeats, estimate.downbeats) <= 0.03), 0.95)
+
+
+    def test_even_bars_keep_the_shorter_meter(self):
+        for beats_per_bar, seconds in itertools.product((2, 3), (20, 40, 120)):
+            with self.subTest(beats_per_bar=beats_per_bar, seconds=seconds):
+                store, grid = grid_of(click_track(120, beats_per_bar, seconds)[0])
+                self.assertEqual(beats.meter(store, grid).candidates[0][0], f"{beats_per_bar}/4")
 
 
 class SwingTest(unittest.TestCase):
