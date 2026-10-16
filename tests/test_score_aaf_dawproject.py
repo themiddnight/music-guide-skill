@@ -9,9 +9,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import signal
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import aaf2
 import jsonschema
@@ -20,6 +22,10 @@ import soundfile as sf
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(SKILL / "scripts"))
+
+from music_guide.adapters import aaf as aaf_adapter  # noqa: E402
+from music_guide.model import Evidence  # noqa: E402
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 
 DOCTYPE = ('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" '
@@ -400,7 +406,7 @@ class MuseScoreTest(ScoreCase):
         self.assertEqual(self.values(data, "musescore.velocity_placeholders")[0], {"placeholder": 6, "total": 6, "velocity": 80})
 
 
-def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True):
+def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True, unrated=False):
     """A composition with two sound slots, a picture slot, source clips and markers, written by pyaaf2."""
     with aaf2.open(str(path), "w") as f:
         ident = f.header["IdentificationList"].value[0]
@@ -436,6 +442,10 @@ def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True)
             for _ in range(clips):
                 slot.segment.components.append(master.create_source_clip(slot_id=1))
         composition.create_picture_slot(edit_rate=25).name = "Video"
+        if unrated:
+            slot = composition.create_empty_sequence_slot(edit_rate=25, media_kind="sound")
+            slot.name = "No rate"
+            slot["EditRate"].value = aaf2.rational.AAFRational(0, 1)
         if markers:
             event_slot = f.create.EventMobSlot()
             event_slot.slot_id, event_slot.name, event_slot.edit_rate = 9, "Markers", aaf2.rational.AAFRational(48000, 1)
@@ -533,27 +543,109 @@ class AafTest(ScoreCase):
 
     def test_unsupported_and_corrupt_files_are_source_errors(self):
         good = self.make().read_bytes()
-        bomb = bytearray(good)
-        with aaf2.open(str(self.dir / "bomb.aaf"), "w"):
-            pass
-        (self.dir / "bomb.aaf").write_bytes(bytes(bomb))
-        with aaf2.open(str(self.dir / "bomb.aaf"), "rw") as f:
-            index = next(entry for entry in f.cfb.listdir_dict("/Header-2/Content-3b03").values()
-                         if entry.name.endswith(" index"))
-            stream = index.open("rw")
-            stream.write(struct.pack("<I", 0xFFFFFFFF))
         cases = {
             "xml.aaf": (b'<?xml version="1.0"?><AAF/>', "XML"),
             "text.aaf": (b"\xd0\xcf\x11\xe0 not quite", "does not match"),
             "truncated.aaf": (good[:4096], "cannot read AAF"),
             "header.aaf": (good[:512], "cannot read AAF"),
             "zeroed.aaf": (good[:8] + bytes(len(good) - 8), "cannot read AAF"),
-            "bomb.aaf": ((self.dir / "bomb.aaf").read_bytes(), "AAF parser stopped"),
         }
         for name, (content, fragment) in cases.items():
             with self.subTest(name=name):
                 data = self.evidence("--project", self.write(name, content), mixdown=True)
                 self.assert_rejected(data, fragment, "s2")
+
+    def make_bomb(self):
+        """An index that claims 4 billion entries: pyaaf2 allocates memory in proportion to the claim."""
+        path = self.dir / "bomb.aaf"
+        with aaf2.open(str(path), "w"):
+            pass
+        with aaf2.open(str(path), "rw") as f:
+            index = next(entry for entry in f.cfb.listdir_dict("/Header-2/Content-3b03").values()
+                         if entry.name.endswith(" index"))
+            index.open("rw").write(struct.pack("<I", 0xFFFFFFFF))
+        return path
+
+    def run_adapter(self, path, **limits):
+        evidence = Evidence()
+        aaf_adapter.aaf(path, "s1", evidence, "summary", **limits)
+        return evidence
+
+    def test_memory_limit_stops_a_parser_that_over_allocates(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*needed more than 256 MiB"):
+            self.run_adapter(self.make_bomb(), memory_bytes=256 * 1024 * 1024)
+        self.assertLess(time.monotonic() - started, 40)
+
+    def test_time_limit_stops_the_parser(self):
+        with self.assertRaisesRegex(ValueError, r"AAF parser stopped: .*took longer than 0.05 seconds"):
+            self.run_adapter(self.make(), timeout_seconds=0.05)
+        self.assertEqual(self.run_adapter(self.make(), timeout_seconds=30).observations[0].property, "project.application")
+
+    def test_child_ends_itself_at_its_own_deadline(self):
+        config = {"paths": aaf_adapter.child_sys_path(), "path": str(self.make_bomb()), "sourceId": "s1",
+                  "detail": "summary", "deadline": 1, "memory": 8 * 1024 ** 3}
+        started = time.monotonic()
+        child = subprocess.run([sys.executable, "-I", "-c", aaf_adapter.CHILD_CODE], input=json.dumps(config).encode(),
+                               capture_output=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 30)
+        deadline_status = (-signal.SIGALRM, aaf_adapter.DEADLINE_EXIT) if hasattr(signal, "SIGALRM") else (aaf_adapter.DEADLINE_EXIT,)
+        self.assertIn(child.returncode, deadline_status)
+
+    def test_child_sees_the_parents_import_path(self):
+        shim = self.dir / "shim"
+        (shim / "aaf2").mkdir(parents=True)
+        (shim / "aaf2" / "__init__.py").write_text('raise ImportError("shim aaf2 was loaded")\n')
+        result = subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(self.mix),
+                                 "--project", str(self.make())], cwd=self.dir, text=True, capture_output=True,
+                                env={**os.environ, "PYTHONPATH": str(shim)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assert_rejected(data, "shim aaf2 was loaded", "s2")
+        plain = self.evidence("--project", self.make("plain.aaf"))
+        self.assertEqual(plain["sources"][0]["status"], "ok")
+
+    def test_child_import_path_drops_the_working_directory_and_relative_entries(self):
+        elsewhere = self.dir / "site"
+        elsewhere.mkdir()
+        original = sys.path[:]
+        self.addCleanup(lambda: sys.path.__setitem__(slice(None), original))
+        sys.path[:] = ["", ".", "relative", str(self.dir), str(elsewhere), *original]
+        previous = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        chosen = aaf_adapter.child_sys_path()
+        self.assertEqual(chosen[0], str(aaf_adapter.SCRIPTS_DIR))
+        self.assertIn(str(elsewhere), chosen)
+        for dropped in ("", ".", "relative", str(self.dir)):
+            self.assertNotIn(dropped, chosen)
+
+    def test_parent_does_not_import_pyaaf2(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import music_guide.cli, music_guide.adapters.aaf; "
+                "print('aaf2' in sys.modules)")
+        result = subprocess.run([sys.executable, "-c", code, str(SKILL / "scripts")], capture_output=True, text=True)
+        self.assertEqual((result.stdout.strip(), result.returncode), ("False", 0), result.stderr)
+
+    def test_child_output_is_read_with_a_bound(self):
+        import io
+        reader = aaf_adapter._Reader(io.BytesIO(b"x" * 100_000), 1000)
+        reader.run()
+        self.assertTrue(reader.overflow)
+        self.assertEqual(len(reader.data), 1000)
+
+    def test_a_missing_memory_monitor_is_reported(self):
+        with mock.patch.object(aaf_adapter, "_memory_poller", return_value=None):
+            evidence = self.run_adapter(self.make())
+        notices = [item for item in evidence.diagnostics if item.code == "aaf_memory_cap_unavailable"]
+        self.assertEqual(len(notices), 0 if sys.platform.startswith("linux") else 1)
+        self.assertEqual(len([item for item in self.run_adapter(self.make()).diagnostics
+                              if item.code == "aaf_memory_cap_unavailable"]), 0)
+
+    def test_slots_without_an_edit_rate_are_counted(self):
+        data = self.evidence("--project", self.make(unrated=True))
+        warning = next(item for item in data["diagnostics"] if item["code"] == "aaf_slots_without_edit_rate")
+        self.assertIn("1 slot", warning["message"])
+        self.assertEqual(self.values(data, "project.track_count"), [3])
 
 
 def daw_note(time, duration, key, vel="0.5", channel=0):
