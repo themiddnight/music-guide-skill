@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import ableton, ardour, dawproject, lmms, logic, midi, reaper, solna
+from .adapters import ableton, ardour, cubase, dawproject, flstudio, lmms, logic, midi, reaper, solna, studioone
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -62,7 +62,8 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Export a mixdown and stems, and the MIDI regions as a MIDI file."),
     ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, logic.garageband,
                   "Export the song to disk as WAV or AIFF. GarageBand cannot export MIDI; Logic Pro can open the project to do so."),
-    ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, cubase.detect,
+                  cubase.cubase,
                   "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown."),
     ProjectFormat("ableton-als", "Ableton Live set", (".als",), "file", MAX_ZIP_BYTES, _signature(b"\x1f\x8b"),
                   ableton.ableton,
@@ -70,9 +71,10 @@ FORMATS: tuple[ProjectFormat, ...] = (
     ProjectFormat("reaper-rpp", "REAPER project", (".rpp",), "file", MAX_ZIP_BYTES,
                   _signature(b"<REAPER_PROJECT", text=True), reaper.reaper,
                   "Render a mixdown and stems, and export MIDI items as MIDI files."),
-    ProjectFormat("fl-studio-flp", "FL Studio project", (".flp",), "file", MAX_ZIP_BYTES, _signature(b"FLhd"), None,
+    ProjectFormat("fl-studio-flp", "FL Studio project", (".flp",), "file", MAX_ZIP_BYTES, flstudio.detect, flstudio.flstudio,
                   "Export a WAV mixdown and stems, and use File > Export > MIDI file."),
-    ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, _signature(ZIP), None,
+    ProjectFormat("studio-one-song", "Studio One song", (".song",), "file", MAX_ZIP_BYTES, studioone.detect,
+                  studioone.studioone,
                   "Export a DAWproject (Studio One 6.5 or later), or a mixdown, stems and MIDI."),
     ProjectFormat("ardour-session", "Ardour session", (".ardour",), "file", ardour.MAX_ARDOUR_BYTES, _signature(b"<?xml", b"<Session", text=True), ardour.ardour,
                   "Export a mixdown and stems with Session > Export, and MIDI regions as MIDI files."),

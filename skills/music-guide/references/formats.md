@@ -25,11 +25,11 @@ At least one of `--mixdown`, `--stem`, `--midi`, `--solna`, `--project` or `--da
 | Reason | `.reason` | Inventory; export stems and MIDI |
 | Logic Pro | `.logicx` directory | Parsed: metadata plists per alternative; tracks, regions and MIDI need an export |
 | GarageBand | `.band` directory | Parsed when `Alternatives/NNN/MetaData.plist` exists (GarageBand 10.0.3+); older layouts need an audio export |
-| Cubase, Nuendo | `.cpr`, `.npr` | Inventory; export DAWproject (Cubase 14+) or MIDI |
+| Cubase, Nuendo | `.cpr`, `.npr` | Partly parsed: application version and media attributes; track, plugin and media names at low confidence. Export DAWproject (Cubase 14+) or MIDI for complete data |
 | Ableton Live | `.als` | Parsed |
 | REAPER | `.rpp` | Parsed |
-| FL Studio | `.flp` | Inventory; export stems and MIDI |
-| Studio One | `.song` | Inventory; export DAWproject (6.5+) or stems and MIDI |
+| FL Studio | `.flp` | Parsed: tempo, channels, patterns, pattern notes, playlist counts. Export stems and MIDI for the sound |
+| Studio One | `.song` | Parsed: tempo and meter maps, tracks, markers, clip counts, plugins, media names. Instrument notes are not decoded; export DAWproject (6.5+) or MIDI for them |
 | Ardour | `.ardour` | Parsed: tempo map, meter, locations, routes, plugins, region counts |
 | LMMS | `.mmp`, `.mmpz` | Parsed: tempo, meter, tracks, plugins, note summaries |
 | AAF, OMF | `.aaf`, `.omf` | Inventory |
@@ -104,3 +104,13 @@ Sources: Ableton `.als`: github.com/offlinemark/dawtool (`dawtool/daw/ableton.py
 Time domains in reports: `static` (one value for the scope), `midi_ticks` (positioned by MIDI ticks), `project_beats` and `project_seconds` (positioned in a project timeline), and `loop_sequence` (ordered inside a stored loop).
 
 Do not launch a DAW, execute a plugin, decode proprietary data without a tested parser, or follow media paths as a shortcut. Ask for WAV, MIDI, stems, or an explicitly supported export instead.
+
+## FL Studio, Studio One and Cubase
+
+These three formats are undocumented, so each adapter records how far it was checked. No adapter loads a plugin, opens a media path or reads a file other than the project.
+
+**FL Studio (`.flp`).** Reads the event stream (header `FLhd`, data `FLdt`, event IDs 0-63 byte, 64-127 word, 128-191 dword, 192-255 length-prefixed). Reports `project.application`, `tempo` (event 156, BPM x 1000, or the legacy whole-BPM event 66; confidence medium), `meter` (events 17 and 18, confidence low because the meaning is a single-source reading), channels as `project.track` with `flstudio.channel`, channel plugin and mixer slot names as `project.plugin`, sample basenames, `flstudio.pattern` and per-pattern `flstudio.pattern_notes` (confidence medium, beats are quarter notes inside the pattern), `flstudio.arrangement` playlist counts, and title, genre, artists and comments. Note pitch is FL's key number, which equals the MIDI note number (FL names MIDI 60 C5; reports name it C4). `--detail full` adds `flstudio.note` in the `pattern_beats` time domain, which is positioned inside a pattern, not on the arrangement timeline. Not decoded: tempo automation, time markers, plugin state, which insert holds which slot, and where patterns sit in time. Sources: PyFLP documentation and source (pyflp.readthedocs.io), node-flp (github.com/andrewrk/node-flp). No real project was available, so tests use synthetic files.
+
+**Studio One (`.song`).** A ZIP of XML read with `defusedxml`. `Song/song.xml` gives the tempo map (seconds per quarter note converted to BPM), time signature map, key signature map, tracks, marker track, arranger sections and per-track clip counts; `Devices/audiomixer.xml` gives insert plugin names, tied to a track through its channel UID; `Song/mediapool.xml` gives media basenames; `metainfo.xml` gives the generator (`project.application`), `Media:SampleRate` and `Media:KeySignature`. Every metainfo attribute is also recorded with its literal id as `studioone.metainfo`, and attributes that are not named above are never mapped to a shared property. A single tempo or meter segment at beat 0 becomes a static claim; longer maps stay as `project.tempo_map` and `studioone.meter_map`. Another public reader reports that Studio One can write prefixes it never declares (`x:id`); this reader repairs that once, after a failed strict parse. Not decoded: instrument notes (`Performances/*.musicx`), automation envelopes, track kinds other than audio and instrument. Source: studio-one-mcp (github.com/NeanderthalMan/studio-one-mcp), whose reader was verified on songs saved by Studio One 5.5.2. No real song was available, so tests use synthetic archives in that shape.
+
+**Cubase and Nuendo (`.cpr`, `.npr`).** A RIFF-like file with an extra `NUND` tag, then `ROOT`/`ARCH` chunk pairs. Structural and high confidence: application name and version from the `PAppVersion` object, the chunk list, and the media attributes in the `Metadata` chunk (`cubase.media_attribute`). `AudioSampleRate` also becomes `project.sample_rate` (medium) and `MusicalTempo` and `MusicalSignature` become `tempo` and `meter` at low confidence, because the tempo and signature tracks are not decoded. Track names, plugin names (`Plugin Name` attributes) and media file names are found by byte patterns in the object stream and are reported at low confidence with that reason; the track kind comes from the class reference stored before the track header, and is `unknown` when none is found. A failure in any deeper step leaves the application and adds a `cubase_deep_parse_failed` warning. Checked against one Cubase 11 project only. Sources: cbconv (code.volse.net/audio/cbconv) for the container layout.
