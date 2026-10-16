@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -75,7 +76,7 @@ class ScoreCase(unittest.TestCase):
     def run_cli(self, *args, mixdown=True):
         prefix = ["--mixdown", str(self.mix)] if mixdown else []
         return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *prefix, *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+                              cwd=self.dir, text=True, capture_output=True, timeout=60)
 
     def evidence(self, *args, mixdown=False):
         result = self.run_cli(*args, mixdown=mixdown)
@@ -208,6 +209,86 @@ class MusicXmlTest(ScoreCase):
         data = self.evidence("--project", self.write("binary.musicxml", b"\x00\x01binary"), mixdown=True)
         self.assertEqual(data["sources"][1]["status"], "error")
 
+    def one_part(self, body, attributes="<divisions>1</divisions>", name="one.musicxml"):
+        measure = f'<measure number="1"><attributes>{attributes}</attributes>{body}</measure>'
+        return self.write(name, partwise(measure, "<measure number='1'/>"))
+
+    def test_overflowing_and_exponent_numbers_are_rejected_quickly(self):
+        cases = {
+            "duration-exp.musicxml": (note("C", 4, "1e400"), "duration"),
+            "duration-huge-exp.musicxml": (note("C", 4, "1e10000000"), "duration"),
+            "duration-digits.musicxml": (note("C", 4, "9" * 400), "duration"),
+            "alter-exp.musicxml": (note("C", 4, 1, alter="1e400"), "alter"),
+            "divisions-exp.musicxml": (None, "divisions"),
+        }
+        for name, (body, fragment) in cases.items():
+            with self.subTest(name=name):
+                if body is None:
+                    path = self.one_part(note("C", 4, 1), "<divisions>1e400</divisions>", name)
+                else:
+                    path = self.one_part(body, name=name)
+                self.assert_rejected(self.evidence("--project", path, mixdown=True), fragment, "s2")
+
+    def test_unreadable_note_dynamics_fall_back_to_the_placeholder(self):
+        for text in ("inf", "nan", "1e400", "-5", "loud"):
+            with self.subTest(dynamics=text):
+                data = self.evidence("--project", self.one_part(
+                    note("C", 4, 1).replace("<note>", f'<note dynamics="{text}">')))
+                summary = self.by_scope(data, "project.track_notes")["project_track:0"]
+                self.assertEqual((summary["velocityMin"], summary["velocityMax"]), (90, 90))
+
+    def test_sound_dynamics_set_the_default_velocity_until_changed_and_note_dynamics_win(self):
+        body = ('<sound dynamics="50"/>' + note("C", 4, 1) + note("D", 4, 1).replace("<note>", '<note dynamics="100">')
+                + '<direction><sound dynamics="80"/></direction>' + note("E", 4, 1))
+        data = self.evidence("--project", self.one_part(body), "--detail", "full")
+        notes = {item["value"]["pitch"]: item["value"]["velocity"] for item in data["observations"]
+                 if item["property"] == "project.note"}
+        self.assertEqual(notes, {60: 45, 62: 90, 64: 72})
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "high")
+        self.assertFalse(any(item["code"] == "score_velocity_placeholder" for item in data["diagnostics"]))
+
+    def test_placeholder_velocities_lower_confidence_and_are_counted(self):
+        body = '<sound dynamics="50"/>' + note("C", 4, 1) + note("D", 4, 1)
+        data = self.evidence("--project", self.one_part(note("A", 3, 1) + body))
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("1 of 3 velocities are placeholders", summary["confidenceReason"])
+        counts = self.values(data, "musicxml.velocity_placeholders")
+        self.assertEqual(counts, [{"placeholder": 1, "total": 3, "velocity": 90}])
+        diagnostic = next(item for item in data["diagnostics"] if item["code"] == "score_velocity_placeholder")
+        self.assertIn("1 of 3", diagnostic["message"])
+
+    def test_composite_meter_microtones_octave_transposition_and_early_backup_are_flagged(self):
+        signature = '<time><beats>2</beats><beat-type>4</beat-type><beats>3</beats><beat-type>8</beat-type></time>'
+        data = self.evidence("--project", self.one_part(note("C", 4, 1), "<divisions>1</divisions>" + signature))
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertTrue(any(item["code"] == "musicxml_composite_meter" for item in data["diagnostics"]))
+        data = self.evidence("--project", self.one_part(note("C", 4, 1, alter="0.5") + note("D", 4, 1, alter="-0.5")))
+        flag = next(item for item in data["diagnostics"] if item["code"] == "musicxml_microtonal")
+        self.assertIn("2 note", flag["message"])
+        octave = ("<divisions>1</divisions><key><fifths>2</fifths><mode>major</mode></key>"
+                  "<transpose><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>")
+        data = self.evidence("--project", self.one_part(note("C", 4, 1), octave))
+        self.assertEqual(self.values(data, "project.key"), ["D major"])
+        pitch = self.by_scope(data, "project.track_notes")["project_track:0"]["pitchMin"]["midi"]
+        self.assertEqual(pitch, 48)
+        early = note("C", 4, 1) + '<backup><duration>4</duration></backup>' + note("D", 4, 1)
+        data = self.evidence("--project", self.one_part(early))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertEqual(self.by_scope(data, "project.track_notes")["project_track:0"]["noteCount"], 2)
+        self.assertTrue(any(item["code"] == "musicxml_backup_clamped" for item in data["diagnostics"]))
+
+    def test_many_repeated_key_and_meter_marks_stay_linear(self):
+        measures = "".join(f'<measure number="{n}"><attributes><key><fifths>{n % 3}</fifths></key>'
+                           f'<time><beats>{n % 5 + 1}</beats><beat-type>4</beat-type></time></attributes>'
+                           + note("C", 4, 1) + '</measure>' for n in range(1, 55001))
+        measures = measures.replace('<measure number="1">', '<measure number="1"><attributes><divisions>1</divisions></attributes>', 1)
+        started = time.monotonic()
+        data = self.evidence("--project", self.write("many.musicxml", partwise(measures, "<measure number='1'/>")))
+        self.assertEqual(data["sources"][0]["status"], "ok")
+        self.assertLess(time.monotonic() - started, 12)
+
 
 class MuseScoreTest(ScoreCase):
     SCORE = (
@@ -292,6 +373,31 @@ class MuseScoreTest(ScoreCase):
                 data = self.evidence("--project", path, mixdown=True)
                 self.assertEqual(data["sources"][1]["status"], "error")
                 self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+    def located(self, fractions):
+        return self.SCORE.replace("<voice><Rest>", f"<voice><location><fractions>{fractions}</fractions></location><Rest>", 1)
+
+    def test_huge_fractions_and_dots_are_rejected_quickly(self):
+        cases = {
+            "fractions-exp.mscz": self.located("1e400"),
+            "fractions-huge-exp.mscz": self.located("1e10000000"),
+            "fractions-digits.mscz": self.located(f"{'9' * 400}/1"),
+            "duration-exp.mscz": self.SCORE.replace("<duration>1/2</duration>", "<duration>1e100000000</duration>"),
+            "dots.mscz": self.SCORE.replace("<dots>1</dots>", "<dots>5000000</dots>"),
+            "tempo-inf.mscz": self.SCORE.replace("<tempo>1.6</tempo>", "<tempo>inf</tempo>"),
+        }
+        for name, score in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.package(name, score), mixdown=True)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+    def test_all_velocities_are_placeholders_and_say_so(self):
+        data = self.evidence("--project", self.package())
+        summary = next(item for item in data["observations"] if item["property"] == "project.track_notes")
+        self.assertEqual(summary["confidence"], "medium")
+        self.assertIn("6 of 6 velocities are placeholders", summary["confidenceReason"])
+        self.assertEqual(self.values(data, "musescore.velocity_placeholders")[0], {"placeholder": 6, "total": 6, "velocity": 80})
 
 
 def build_aaf(path, *, top_level=True, track_rates=(48000, 48000), markers=True):

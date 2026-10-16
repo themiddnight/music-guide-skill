@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 from xml.etree.ElementTree import Element
@@ -12,6 +14,7 @@ from ..notes import Note
 from ..project import ProjectFacts
 from .common import _child, _local, _parse_xml, _read_zip_member
 from .scores import ScoreData, ScorePart, emit_score
+from .textnum import beat_float, parse_integer, parse_ratio
 
 MAX_SCORE_XML_BYTES = 16 * 1024 * 1024
 MAX_CONTAINER_BYTES = 256 * 1024
@@ -24,6 +27,9 @@ GRACE_TAGS = {"acciaccatura", "appoggiatura", "grace4", "grace8", "grace8after",
               "grace32", "grace32after"}
 REPEAT_TAGS = {"startRepeat", "endRepeat", "Jump", "Marker"}
 QUARTERS_PER_WHOLE = 4
+MAX_DOTS = 16
+MAX_TUPLET_DEPTH = 16
+MAX_SIGNATURE = 1_000_000
 
 
 def _score_member(path: Path) -> str:
@@ -52,23 +58,23 @@ def _text(parent: Element | None, name: str) -> str | None:
 def _fraction(text: str | None, where: str, label: str) -> Fraction | None:
     if text is None:
         return None
-    try:
-        return Fraction(text)
-    except (ValueError, ZeroDivisionError) as error:
-        raise ValueError(f"{where}: {label} must be a fraction such as 1/4, not {text!r}") from error
+    value = parse_ratio(text)
+    if value is None:
+        raise ValueError(f"{where}: {label} must be a fraction such as 1/4, not {text[:40]!r}")
+    return value
 
 
 def _integer(text: str | None, where: str, label: str) -> int | None:
     if text is None:
         return None
-    try:
-        return int(text)
-    except ValueError as error:
-        raise ValueError(f"{where}: {label} must be an integer, not {text!r}") from error
+    value = parse_integer(text)
+    if value is None:
+        raise ValueError(f"{where}: {label} must be an integer, not {text[:40]!r}")
+    return value
 
 
 class _StaffReader:
-    def __init__(self, staff_id: str, part: ScorePart, transposing: bool, data: ScoreData, flags: set[str]) -> None:
+    def __init__(self, staff_id: str, part: ScorePart, transposing: bool, data: ScoreData, flags: Counter[str]) -> None:
         self.id = staff_id
         self.part = part
         self.transposing = transposing
@@ -85,12 +91,12 @@ class _StaffReader:
         for number, measure in enumerate(measures, 1):
             self._measure(measure, f"staff {self.id} measure {number}")
         self.data.measures = max(self.data.measures, len(measures))
-        self.data.length_beats = max(self.data.length_beats, float(self.start * QUARTERS_PER_WHOLE))
-        return [Note(pitch, DEFAULT_VELOCITY, float(begin * QUARTERS_PER_WHOLE), float(end * QUARTERS_PER_WHOLE), None)
-                for pitch, begin, end in self.notes]
+        self.data.length_beats = max(self.data.length_beats, beat_float(self.start * QUARTERS_PER_WHOLE, "score length"))
+        return [Note(pitch, DEFAULT_VELOCITY, beat_float(begin * QUARTERS_PER_WHOLE), beat_float(end * QUARTERS_PER_WHOLE),
+                     None) for pitch, begin, end in self.notes]
 
     def _beat(self, cursor: Fraction) -> float:
-        return float((self.start + cursor) * QUARTERS_PER_WHOLE)
+        return beat_float((self.start + cursor) * QUARTERS_PER_WHOLE)
 
     def _measure(self, measure: Element, where: str) -> None:
         declared = _fraction(measure.attrib.get("len"), where, "Measure len")
@@ -99,9 +105,9 @@ class _StaffReader:
         for item in measure:
             name = _local(item.tag)
             if name in REPEAT_TAGS:
-                self.flags.add("repeat")
+                self.flags["repeat"] += 1
             elif name == "multiMeasureRest":
-                self.flags.add("multimeasure")
+                self.flags["multimeasure"] += 1
             elif name == "voice":
                 extent = max(extent, self._voice(item, voices, declared, where))
                 voices += 1
@@ -115,7 +121,7 @@ class _StaffReader:
             if name == "TimeSig":
                 numerator = _integer(_text(item, "sigN"), where, "sigN")
                 denominator = _integer(_text(item, "sigD"), where, "sigD")
-                if numerator and denominator and numerator > 0 and denominator > 0:
+                if numerator and denominator and 0 < numerator <= MAX_SIGNATURE and 0 < denominator <= MAX_SIGNATURE:
                     self.signature = Fraction(numerator, denominator)
                     self.signature_known = True
                     self.data.meters.append((self._beat(cursor), numerator, denominator))
@@ -128,7 +134,9 @@ class _StaffReader:
                 try:
                     bps = float(tempo) if tempo is not None else 0.0
                 except ValueError as error:
-                    raise ValueError(f"{where}: Tempo tempo must be a number, not {tempo!r}") from error
+                    raise ValueError(f"{where}: Tempo tempo must be a number, not {tempo[:40]!r}") from error
+                if not math.isfinite(bps * 60):
+                    raise ValueError(f"{where}: Tempo tempo must be finite")
                 if bps > 0:
                     self.data.tempos.append((self._beat(cursor), bps * 60))
             elif name == "RehearsalMark":
@@ -140,8 +148,9 @@ class _StaffReader:
             elif name == "Tuplet":
                 normal = _integer(_text(item, "normalNotes"), where, "normalNotes")
                 actual = _integer(_text(item, "actualNotes"), where, "actualNotes")
-                if not normal or not actual or normal < 0 or actual < 0:
-                    raise ValueError(f"{where}: Tuplet needs positive normalNotes and actualNotes")
+                if not normal or not actual or normal < 0 or actual < 0 or len(tuplets) >= MAX_TUPLET_DEPTH:
+                    raise ValueError(f"{where}: Tuplet needs positive normalNotes and actualNotes, nested at most "
+                                     f"{MAX_TUPLET_DEPTH} deep")
                 tuplets.append(Fraction(normal, actual))
             elif name == "endTuplet":
                 if tuplets:
@@ -151,10 +160,10 @@ class _StaffReader:
                 if name == "Chord" and not GRACE_TAGS & {_local(child.tag) for child in item}:
                     self._chord(item, number, cursor, cursor + length, where)
                 elif name == "Chord":
-                    self.flags.add("grace")
+                    self.flags["grace"] += 1
                     continue
                 elif name == "RepeatMeasure":
-                    self.flags.add("repeat_measure")
+                    self.flags["repeat_measure"] += 1
                 cursor += length
         return cursor
 
@@ -165,11 +174,15 @@ class _StaffReader:
         explicit = _fraction(_text(item, "duration"), where, "duration")
         kind = _text(item, "durationType")
         if explicit is not None:
+            if explicit < 0:
+                raise ValueError(f"{where}: duration must not be negative")
             length = explicit
         elif kind == "measure":
             length = measure_length
         elif kind in WHOLE_NOTES:
             dots = _integer(_text(item, "dots"), where, "dots") or 0
+            if not 0 <= dots <= MAX_DOTS:
+                raise ValueError(f"{where}: dots must be between 0 and {MAX_DOTS}")
             length = WHOLE_NOTES[kind] * (2 - Fraction(1, 2 ** dots))
         else:
             raise ValueError(f"{where}: {_local(item.tag)} has unknown durationType {kind!r}")
@@ -183,7 +196,7 @@ class _StaffReader:
             if pitch is None or not 0 <= pitch <= 127:
                 raise ValueError(f"{where}: Note pitch must be a MIDI number 0-127")
             if _text(note, "play") == "0":
-                self.flags.add("unsounded")
+                self.flags["unsounded"] += 1
                 continue
             absolute_begin, absolute_end = self.start + begin, self.start + end
             spanners = {_local(link.tag) for spanner in note if _local(spanner.tag) == "Spanner"
@@ -236,18 +249,20 @@ def musescore(path: Path, source_id: str, evidence: Evidence, detail: Detail) ->
     staves = {item.attrib.get("id"): item for item in score
               if _local(item.tag) == "Staff" and _child(item, "Measure") is not None}
     data = ScoreData(default_velocity=DEFAULT_VELOCITY)
-    flags: set[str] = set()
+    flags: Counter[str] = Counter()
     parts = [item for item in score if _local(item.tag) == "Part"]
     if not parts or not staves:
         raise ValueError("MuseScore score needs at least one Part and one Staff with measures")
     for index, part in enumerate(parts):
         instrument = _child(part, "Instrument")
         name = _text(part, "trackName") or _text(instrument, "trackName") or _text(instrument, "longName")
-        transposing = (_integer(_text(instrument, "transposeChromatic"), f"part {index}", "transposeChromatic") or 0) != 0
+        chromatic = _integer(_text(instrument, "transposeChromatic"), f"part {index}", "transposeChromatic") or 0
+        transposing = chromatic % 12 != 0
         entry = ScorePart(name, f"Part[{index}]", [], _text(instrument, "trackName"))
         for staff_id in _staff_ids(part):
             if staff_id in staves:
                 entry.notes.extend(_StaffReader(staff_id, entry, transposing, data, flags).read(staves[staff_id]))
+        entry.placeholder_velocities = len(entry.notes)
         data.parts.append(entry)
     data.tempo_locator = "Tempo/tempo"
     if program:
@@ -259,7 +274,7 @@ def musescore(path: Path, source_id: str, evidence: Evidence, detail: Detail) ->
     _flags(evidence, source_id, flags)
 
 
-def _flags(evidence: Evidence, source_id: str, flags: set[str]) -> None:
+def _flags(evidence: Evidence, source_id: str, flags: Counter[str]) -> None:
     notices = {
         "repeat": "Repeats and jumps are not unrolled; each stored measure is read once.",
         "repeat_measure": "Measure-repeat signs were advanced by one measure but their notes are not copied.",
@@ -267,5 +282,6 @@ def _flags(evidence: Evidence, source_id: str, flags: set[str]) -> None:
         "grace": "Grace notes were skipped.",
         "unsounded": "Notes marked as not played were skipped.",
     }
-    for flag in sorted(flags & notices.keys()):
-        evidence.diagnostics.append(Diagnostic(f"musescore_{flag}", "info", notices[flag], source_id))
+    for flag in sorted(notices):
+        if flags[flag]:
+            evidence.diagnostics.append(Diagnostic(f"musescore_{flag}", "info", notices[flag], source_id))

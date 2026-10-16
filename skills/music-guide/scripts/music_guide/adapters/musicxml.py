@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 from xml.etree.ElementTree import Element
@@ -12,6 +14,7 @@ from ..notes import Note
 from ..project import ProjectFacts
 from .common import _child, _local, _parse_xml, _read_bounded, _read_zip_member
 from .scores import ScoreData, ScorePart, emit_score
+from .textnum import beat_float, parse_decimal, parse_integer
 
 MAX_SCORE_XML_BYTES = 16 * 1024 * 1024
 MAX_CONTAINER_BYTES = 256 * 1024
@@ -76,10 +79,9 @@ def _fraction(parent: Element, name: str, where: str, *, positive: bool = False,
     text = _text(parent, name)
     if text is None:
         return None
-    try:
-        value = Fraction(text)
-    except (ValueError, ZeroDivisionError) as error:
-        raise ValueError(f"{where}: <{name}> must be a number, not {text!r}") from error
+    value = parse_decimal(text)
+    if value is None:
+        raise ValueError(f"{where}: <{name}> must be a plain decimal number, not {text[:40]!r}")
     if not signed and (value < 0 or (positive and value == 0)):
         raise ValueError(f"{where}: <{name}> must be {'positive' if positive else 'nonnegative'}")
     return value
@@ -89,34 +91,31 @@ def _integer(parent: Element, name: str, where: str) -> int | None:
     text = _text(parent, name)
     if text is None:
         return None
-    try:
-        return int(text)
-    except ValueError as error:
-        raise ValueError(f"{where}: <{name}> must be an integer, not {text!r}") from error
+    value = parse_integer(text)
+    if value is None:
+        raise ValueError(f"{where}: <{name}> must be an integer, not {text[:40]!r}")
+    return value
 
 
-def _midi_pitch(note: Element, transposition: int, where: str) -> int:
+def _midi_pitch(note: Element, transposition: int, where: str) -> tuple[int, bool]:
     pitch = _child(note, "pitch")
     step = (_text(pitch, "step") or "").upper()
     octave = _integer(pitch, "octave", where)
     if step not in STEPS or octave is None:
         raise ValueError(f"{where}: <pitch> needs a step A-G and an octave")
-    alter = _fraction(pitch, "alter", where, signed=True) or 0
+    alter = _fraction(pitch, "alter", where, signed=True) or Fraction(0)
     value = (octave + 1) * 12 + STEPS[step] + round(alter) + transposition
     if not 0 <= value <= 127:
         raise ValueError(f"{where}: pitch {value} is outside the MIDI range 0-127")
-    return value
+    return value, alter.denominator != 1
 
 
-def _velocity(note: Element) -> int:
-    dynamics = note.attrib.get("dynamics")
-    if dynamics is not None:
-        try:
-            # 100 percent of the default forte is MIDI velocity 90.
-            return max(1, min(127, round(float(dynamics) * 0.9)))
-        except ValueError:
-            pass
-    return DEFAULT_VELOCITY
+def _dynamics_velocity(text: str | None) -> int | None:
+    """MusicXML dynamics are a percentage of the default forte, which is MIDI velocity 90; None when unreadable."""
+    percent = None if text is None else parse_decimal(text)
+    if percent is None or percent < 0:
+        return None
+    return max(1, min(127, round(float(percent) * 0.9)))
 
 
 def _metronome_bpm(metronome: Element) -> float | None:
@@ -128,11 +127,13 @@ def _metronome_bpm(metronome: Element) -> float | None:
         value = float(per_minute)
     except ValueError:
         return None
+    if not math.isfinite(value):
+        return None
     quarters = BEAT_UNITS[unit]
     dots = sum(1 for item in metronome if _local(item.tag) == "beat-unit-dot")
     quarters *= 2 - 0.5 ** dots
     bpm = value * quarters
-    return bpm if bpm > 0 else None
+    return bpm if 0 < bpm < math.inf else None
 
 
 def _positive_tempo(text: str, where: str) -> float:
@@ -140,14 +141,14 @@ def _positive_tempo(text: str, where: str) -> float:
         value = float(text)
     except ValueError as error:
         raise ValueError(f"{where}: sound tempo must be a number, not {text!r}") from error
-    if not 0 < value < float("inf"):
+    if not 0 < value < math.inf:
         raise ValueError(f"{where}: sound tempo must be positive")
     return value
 
 
 class _PartReader:
     def __init__(self, part_id: str, data: ScoreData, sounds: list[tuple[float, float]],
-                 metronomes: list[tuple[float, float]], flags: set[str]) -> None:
+                 metronomes: list[tuple[float, float]], flags: Counter[str]) -> None:
         self.id = part_id
         self.data = data
         self.sounds = sounds
@@ -157,18 +158,22 @@ class _PartReader:
         self.transposition = 0
         self.position = Fraction(0)
         self.notes: list[list] = []
+        self.sound_velocity: int | None = None
         self.open_ties: dict[tuple[str, str, int], int] = {}
 
     @property
     def transposing(self) -> bool:
-        return self.transposition != 0
+        # A pure octave shift leaves the key name unchanged, so only a chromatic shift hides the written key.
+        return self.transposition % 12 != 0
 
-    def measures(self, measures: list[Element]) -> list[Note]:
+    def measures(self, measures: list[Element]) -> tuple[list[Note], int]:
         for number, measure in enumerate(measures, 1):
             self._measure(measure, f"part {self.id} measure {measure.attrib.get('number', number)}")
         self.data.measures = max(self.data.measures, len(measures))
-        self.data.length_beats = max(self.data.length_beats, float(self.position))
-        return [Note(pitch, velocity, float(start), float(end), None) for pitch, velocity, start, end in self.notes]
+        self.data.length_beats = max(self.data.length_beats, beat_float(self.position, "score length"))
+        notes = [Note(pitch, velocity or DEFAULT_VELOCITY, beat_float(start), beat_float(end), None)
+                 for pitch, velocity, start, end in self.notes]
+        return notes, sum(1 for _, velocity, _, _ in self.notes if velocity is None)
 
     def _beats(self, element: Element, where: str) -> Fraction:
         if self.divisions is None:
@@ -187,7 +192,7 @@ class _PartReader:
                 self._attributes(item, where)
             elif name == "note":
                 if _child(item, "grace") is not None:
-                    self.flags.add("grace")
+                    self.flags["grace"] += 1
                     continue
                 chord = _child(item, "chord") is not None
                 beats = self._beats(item, where)
@@ -199,7 +204,8 @@ class _PartReader:
             elif name == "backup":
                 self.position -= self._beats(item, where)
                 if self.position < start:
-                    raise ValueError(f"{where}: <backup> moves before the start of the measure")
+                    self.position = start
+                    self.flags["backup_clamped"] += 1
             elif name == "forward":
                 self.position += self._beats(item, where)
             elif name == "direction":
@@ -207,7 +213,7 @@ class _PartReader:
             elif name == "sound":
                 self._sound(item, where)
             elif name == "barline" and _child(item, "repeat") is not None:
-                self.flags.add("repeat")
+                self.flags["repeat"] += 1
             extent = max(extent, self.position)
         self.position = extent
 
@@ -220,25 +226,28 @@ class _PartReader:
             chromatic = _integer(transpose, "chromatic", where) or 0
             octave = _integer(transpose, "octave-change", where) or 0
             self.transposition = chromatic + 12 * octave
-        beat = float(self.position)
+        beat = beat_float(self.position)
         for key in (item for item in attributes if _local(item.tag) == "key"):
             fifths = _integer(key, "fifths", where)
             if fifths is not None and not self.transposing:
                 self.data.keys.append((beat, fifths, _text(key, "mode")))
         for time in (item for item in attributes if _local(item.tag) == "time"):
+            if sum(1 for child in time if _local(child.tag) == "beats") > 1:
+                self.flags["composite_meter"] += 1
+                continue
             beats, beat_type = _text(time, "beats"), _text(time, "beat-type")
             if beats and beat_type:
-                try:
-                    numerator = sum(int(part) for part in beats.split("+"))
-                    denominator = int(beat_type)
-                except ValueError:
-                    self.flags.add("irregular_meter")
+                parts = [parse_integer(part) for part in beats.split("+")]
+                denominator = parse_integer(beat_type)
+                if None in parts or denominator is None:
+                    self.flags["irregular_meter"] += 1
                     continue
+                numerator = sum(parts)
                 if numerator > 0 and denominator > 0:
                     self.data.meters.append((beat, numerator, denominator))
 
     def _direction(self, direction: Element, where: str) -> None:
-        beat = float(self.position)
+        beat = beat_float(self.position)
         for item in direction:
             if _local(item.tag) == "sound":
                 self._sound(item, where)
@@ -247,7 +256,7 @@ class _PartReader:
                     if _local(kind.tag) == "metronome":
                         bpm = _metronome_bpm(kind)
                         if bpm is None:
-                            self.flags.add("unreadable_metronome")
+                            self.flags["unreadable_metronome"] += 1
                         else:
                             self.metronomes.append((beat, bpm))
                     elif _local(kind.tag) == "rehearsal" and kind.text and kind.text.strip():
@@ -255,15 +264,22 @@ class _PartReader:
 
     def _sound(self, sound: Element, where: str) -> None:
         if "tempo" in sound.attrib:
-            self.sounds.append((float(self.position), _positive_tempo(sound.attrib["tempo"], where)))
+            self.sounds.append((beat_float(self.position), _positive_tempo(sound.attrib["tempo"], where)))
+        if "dynamics" in sound.attrib:
+            velocity = _dynamics_velocity(sound.attrib["dynamics"])
+            if velocity is None:
+                self.flags["unreadable_dynamics"] += 1
+            else:
+                self.sound_velocity = velocity
 
     def _note(self, note: Element, begin: Fraction, end: Fraction, where: str) -> None:
         if _child(note, "rest") is not None or _child(note, "cue") is not None:
             return
         if _child(note, "pitch") is None:
-            self.flags.add("unpitched")
+            self.flags["unpitched"] += 1
             return
-        pitch = _midi_pitch(note, self.transposition, where)
+        pitch, microtonal = _midi_pitch(note, self.transposition, where)
+        self.flags["microtonal"] += microtonal
         ties = {item.attrib.get("type") for item in note if _local(item.tag) == "tie"}
         key = (_text(note, "voice") or "1", _text(note, "staff") or "1", pitch)
         if "stop" in ties and key in self.open_ties:
@@ -272,7 +288,10 @@ class _PartReader:
             if "start" not in ties:
                 del self.open_ties[key]
             return
-        self.notes.append([pitch, _velocity(note), begin, end])
+        velocity = _dynamics_velocity(note.attrib.get("dynamics"))
+        if velocity is None and "dynamics" in note.attrib:
+            self.flags["unreadable_dynamics"] += 1
+        self.notes.append([pitch, velocity if velocity is not None else self.sound_velocity, begin, end])
         if "start" in ties:
             self.open_ties[key] = len(self.notes) - 1
         else:
@@ -333,7 +352,7 @@ def musicxml(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
     data = ScoreData(default_velocity=DEFAULT_VELOCITY)
     sounds: list[tuple[float, float]] = []
     metronomes: list[tuple[float, float]] = []
-    flags: set[str] = set()
+    flags: Counter[str] = Counter()
     parts, declared = _score_parts(root)
     if not parts:
         raise ValueError("MusicXML score has no parts")
@@ -341,11 +360,11 @@ def musicxml(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
         score_part = declared.get(part_id)
         name = _text(score_part, "part-name") if score_part is not None else None
         reader = _PartReader(part_id, data, sounds, metronomes, flags)
-        notes = reader.measures(measures)
+        notes, placeholders = reader.measures(measures)
         first = None if score_part is None else next(
             (item for item in score_part if _local(item.tag) == "score-instrument"), None)
         instrument = _text(first, "instrument-name") if first is not None else None
-        data.parts.append(ScorePart(name, f"part[@id={part_id!r}]", notes, instrument))
+        data.parts.append(ScorePart(name, f"part[@id={part_id!r}]", notes, instrument, placeholders))
     chosen, data.tempo_locator = ((sounds, "sound/@tempo") if sounds else
                                   (metronomes, "direction-type/metronome"))
     data.tempos = chosen
@@ -355,16 +374,24 @@ def musicxml(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> 
     _flags(evidence, source_id, flags, bool(sounds), bool(metronomes))
 
 
-def _flags(evidence: Evidence, source_id: str, flags: set[str], has_sound: bool, has_metronome: bool) -> None:
+def _flags(evidence: Evidence, source_id: str, flags: Counter[str], has_sound: bool, has_metronome: bool) -> None:
     notices = {
         "repeat": "Repeats and jumps are not unrolled; each stored measure is read once.",
         "grace": "Grace notes have no duration and are skipped.",
         "unpitched": "Unpitched (percussion) notes are skipped because they carry no pitch.",
         "irregular_meter": "A time signature without integer beats (for example senza misura) was skipped.",
+        "composite_meter": "{n} time signature(s) with several beats and beat-type pairs (for example 2/4 + 3/8) were "
+                           "skipped because one meter cannot describe them.",
         "unreadable_metronome": "A metronome mark that is not a plain number of one beat unit was skipped.",
+        "microtonal": "{n} note(s) carry a fractional alter; the pitch was rounded to the nearest semitone.",
+        "backup_clamped": "{n} backup(s) moved before the start of their measure and were clamped to it.",
+        "unreadable_dynamics": "{n} dynamics attribute(s) were not a non-negative number and were ignored.",
     }
-    for flag in sorted(flags & notices.keys()):
-        evidence.diagnostics.append(Diagnostic(f"musicxml_{flag}", "info", notices[flag], source_id))
+    for flag in sorted(notices):
+        if flags[flag]:
+            evidence.diagnostics.append(Diagnostic(
+                f"musicxml_{flag}", "info" if flag != "composite_meter" else "warning",
+                notices[flag].format(n=flags[flag]), source_id))
     if has_metronome and not has_sound:
         evidence.diagnostics.append(Diagnostic(
             "musicxml_tempo_from_metronome", "info",
