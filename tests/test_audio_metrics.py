@@ -234,6 +234,33 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertEqual((candidate["tonic"], candidate["mode"]), ("C", "major"))
         self.assertNotIn("No key estimate", " ".join(item["message"] for item in inverted["diagnostics"]))
 
+    def test_many_channels_fold_into_bounded_groups_and_say_so(self):
+        chord = note(60, 4) + note(64, 4) + note(67, 4)
+        samples = np.zeros((len(chord), 12))
+        samples[:, 0], samples[:, 1] = chord, -chord
+        data = self.analyze(samples)
+        candidate = self.value(data, "audio.key_estimate")["candidates"][0]
+        self.assertEqual((candidate["tonic"], candidate["mode"]), ("C", "major"))
+        for prop in ("audio.pitch_class_profile", "audio.key_estimate"):
+            self.assertIn("12 channels were folded into 8 groups", data["facts"][prop]["confidenceReason"])
+        stereo_data = self.analyze(np.stack([chord, -chord], axis=1), name="stereo.wav")
+        self.assertNotIn("folded", stereo_data["facts"]["audio.pitch_class_profile"]["confidenceReason"])
+
+    def test_folded_channels_match_the_same_signal_in_fewer_channels(self):
+        from music_guide.analysis import MusicFeatures
+        rng = np.random.default_rng(5)
+        base = rng.standard_normal((3 * RATE, 8)) * 0.1
+        doubled = np.concatenate([base, base], axis=1)
+        results = []
+        for samples in (base, doubled):
+            features = MusicFeatures(RATE)
+            features.feed(samples)
+            features.finish()
+            results.append(features.pitch_class_profile())
+        self.assertEqual(results[0].keys(), results[1].keys())
+        for name in results[0]:
+            self.assertAlmostEqual(results[0][name], results[1][name], places=9)
+
     def test_periodicity_survives_antiphase_stereo(self):
         burst = np.random.default_rng(3).standard_normal(600) * np.exp(-np.arange(600) / 80) * 0.5
         clicks = np.zeros(10 * RATE)

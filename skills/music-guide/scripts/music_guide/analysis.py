@@ -14,6 +14,8 @@ PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 KK_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 FEATURE_RATE = 11025
+# Per-channel FFTs cost time linearly in channels, so wider files are folded to this many groups.
+MAX_FEATURE_CHANNELS = 8
 TEMPO_RANGE = (60.0, 200.0)
 MIN_TEMPO_SECONDS = 8.0
 MIN_KEY_SECONDS = 2.0
@@ -115,7 +117,9 @@ class MusicFeatures:
     """Decimates each channel to about 11 kHz and averages channel FFT magnitudes for onset and chroma.
 
     Blocks are samples by channels; frames are frames by channels by samples. Averaging magnitudes
-    preserves independently inverted channels. Only compact features are retained for long files.
+    preserves independently inverted channels. More than MAX_FEATURE_CHANNELS channels are first
+    averaged into that many groups, channel i into group i mod MAX_FEATURE_CHANNELS, so adjacent
+    channels such as a stereo pair stay apart. Only compact features are retained for long files.
     """
 
     def __init__(self, rate: int) -> None:
@@ -137,12 +141,23 @@ class MusicFeatures:
         self.chroma_class = np.round(69 + 12 * np.log2(freqs[audible] / 440.0)).astype(int) % 12
         self.chroma = np.zeros(12)
         self.samples = 0
+        self.channels: int | None = None
+        self.fold: np.ndarray | None = None
 
     def feed(self, block: np.ndarray) -> None:
+        block = self._fold(block)
         samples = self._decimate(block) if self.factor > 1 else block
         self.samples += len(samples)
         self._onsets(self.onset.push(samples))
         self._chroma(self.chroma_frames.push(samples))
+
+    def _fold(self, block: np.ndarray) -> np.ndarray:
+        if self.channels is None:
+            self.channels = block.shape[1]
+            if self.channels > MAX_FEATURE_CHANNELS:
+                groups = np.arange(self.channels) % MAX_FEATURE_CHANNELS
+                self.fold = np.eye(MAX_FEATURE_CHANNELS)[groups] / np.bincount(groups)
+        return block if self.fold is None else block @ self.fold
 
     def _decimate(self, block: np.ndarray) -> np.ndarray:
         if self.pending is None:

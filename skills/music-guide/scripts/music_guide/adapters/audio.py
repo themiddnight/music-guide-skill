@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
-from ..analysis import MusicFeatures, SpectrumMeter, StereoMeter
+from ..analysis import MAX_FEATURE_CHANNELS, MusicFeatures, SpectrumMeter, StereoMeter
 from ..loudness import MIN_LOUDNESS_RATE, LoudnessMeter, TruePeakMeter
 from ..model import Confidence, Diagnostic, Evidence, Provenance
 from .common import MAX_AUDIO_BYTES
@@ -223,6 +223,9 @@ def _balance_facts(measured: dict, confidence: Confidence, note: str) -> list[Fa
 
 def _estimate_facts(features: MusicFeatures, note: str) -> list[Fact]:
     facts = []
+    if features.fold is not None:
+        note = (f" {features.channels} channels were folded into {MAX_FEATURE_CHANNELS} groups (channel i into group"
+                f" i mod {MAX_FEATURE_CHANNELS}) to bound cost; inverted channels sharing a group can cancel.") + note
     profile = features.pitch_class_profile()
     if profile is not None:
         facts.append(Fact("audio.pitch_class_profile", profile, "ratio", "chroma-fft",
