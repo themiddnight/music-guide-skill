@@ -68,7 +68,8 @@ class BeatGridTest(unittest.TestCase):
         for bpm, hats, expected in cases:
             with self.subTest(bpm=bpm):
                 samples, truth = with_hats(bpm, hats)
-                _, grid = grid_of(samples)
+                store, grid = grid_of(samples)
+                self.assertAlmostEqual(beats.tempo(store).candidates[0][0], expected, delta=1)
                 self.assertAlmostEqual(grid.bpm, expected, delta=1)
                 self.assertGreaterEqual(np.mean(nearest(truth, grid.times) <= 0.03), 0.95)
 

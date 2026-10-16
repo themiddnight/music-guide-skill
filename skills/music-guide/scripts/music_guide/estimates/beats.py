@@ -12,7 +12,7 @@ from .common import FULL_LIMIT, Method, Report, ReportContext, Skip
 from .store import FeatureStore
 
 TEMPO_RANGE = (60.0, 200.0)
-# A peak at a range edge interpolates up to about 1% past it, so the acceptance test allows this share beyond.
+# A peak at a range edge interpolates up to about 1% past it, so peaks this share beyond are kept at the edge.
 TEMPO_EDGE = 0.02
 MIN_TEMPO_SECONDS = 8.0
 # Autocorrelation is summed per segment, so a 6 hour envelope never needs one whole-file FFT.
@@ -52,13 +52,17 @@ SWING_SEARCH = (0.2, 0.85)
 
 TEMPO_METHOD = Method("onset-autocorrelation",
                       "top autocorrelation peaks of a spectral-flux onset envelope within 60-200 BPM, using FFT"
-                      " magnitudes averaged across channels before computing flux. Half- and double-time readings are"
-                      " equally consistent with periodicity alone; rubato, swing and tempo changes are averaged away.")
+                      " magnitudes averaged across channels before computing flux. Half, once and twice the strongest"
+                      " peak come first, ordered by strength weighted by a log-normal prior around 120 BPM; other"
+                      " peaks follow. Half- and double-time readings are equally consistent with periodicity alone;"
+                      " rubato, swing and tempo changes are averaged away.")
 
 
 @dataclass(frozen=True)
 class TempoCandidates:
-    candidates: tuple[tuple[float, float], ...]  # (bpm, strength relative to the best), best first, at most 3
+    # (bpm, strength relative to the strongest peak), at most 3. The first is the beat grid's tempo: the octave of the
+    # strongest peak that the prior favours. Other octaves follow, then unrelated peaks by strength.
+    candidates: tuple[tuple[float, float], ...]
     octave_related: bool
     method: Method = TEMPO_METHOD
 
@@ -78,6 +82,10 @@ def autocorrelation(envelope: np.ndarray, lags: int) -> np.ndarray:
         spectrum = np.conj(np.fft.rfft(segment, size)) * np.fft.rfft(extended, size)
         total += np.fft.irfft(spectrum, size)[:lags]
     return total
+
+
+def _prior(bpm: float) -> float:
+    return math.exp(-0.5 * (math.log2(bpm / PRIOR_BPM) / PRIOR_OCTAVES) ** 2)
 
 
 def tempo(store: FeatureStore) -> TempoCandidates | Skip:
@@ -100,12 +108,18 @@ def tempo(store: FeatureStore) -> TempoCandidates | Skip:
         offset = 0.5 * (before - after) / curvature if curvature < 0 else 0.0
         bpm = 60 * frame_rate / (lag + offset)
         if TEMPO_RANGE[0] * (1 - TEMPO_EDGE) <= bpm <= TEMPO_RANGE[1] * (1 + TEMPO_EDGE) and here > 0:
-            found.append((float(here), round(bpm, 1)))
+            found.append((float(here), round(float(np.clip(bpm, *TEMPO_RANGE)), 1)))
     if not found:
         return Skip("the onset autocorrelation has no peak within 60-200 BPM.")
     found.sort(reverse=True)
-    best = found[0][0]
-    top = tuple((bpm, round(strength / best, 3)) for strength, bpm in found[:3])
+    best, strongest = found[0]
+
+    def rank(item: tuple[float, float]) -> tuple[bool, float]:
+        strength, bpm = item
+        octave = any(abs(bpm / (strongest * ratio) - 1) < OCTAVE_TOLERANCE for ratio in (0.5, 1, 2))
+        return (not octave, -strength * _prior(bpm) if octave else -strength)
+
+    top = tuple((bpm, round(strength / best, 3)) for strength, bpm in sorted(found[:3], key=rank))
     octave = any(abs(a / b - 2) < 0.06 for a, _ in top for b, _ in top)
     return TempoCandidates(top, octave)
 
@@ -175,15 +189,8 @@ class Swing:
         return ctx.estimate("audio.swing_ratio", value, "ratio", self.method)
 
 
-def _prior(bpm: float) -> float:
-    return math.exp(-0.5 * (math.log2(bpm / PRIOR_BPM) / PRIOR_OCTAVES) ** 2)
-
-
 def beat_grid(store: FeatureStore, tempo: TempoCandidates) -> BeatGrid | Skip:
-    strongest = tempo.candidates[0][0]
-    octaves = [candidate for candidate in tempo.candidates
-               if any(abs(candidate[0] / (strongest * ratio) - 1) < OCTAVE_TOLERANCE for ratio in (0.5, 1, 2))]
-    bpm = max(octaves, key=lambda candidate: candidate[1] * _prior(candidate[0]))[0]
+    bpm = tempo.candidates[0][0]
     period = 60 * store.onset_rate / bpm
     envelope = store.flux
     acf = autocorrelation(envelope - np.mean(envelope), int(2 * period) + 2)
