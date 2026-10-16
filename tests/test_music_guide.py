@@ -568,6 +568,24 @@ class MusicGuideTest(unittest.TestCase):
                 self.assertEqual(data["observations"], [])
                 self.assertTrue(any(item["code"] == "optional_source_error" for item in data["diagnostics"]))
 
+    def test_missing_dependencies_print_one_actionable_line(self):
+        bare = Path("/usr/bin/python3")
+        if not bare.exists():
+            self.skipTest("no system interpreter")
+        if subprocess.run([str(bare), "-I", "-c", "import numpy, soundfile, mido, defusedxml"],
+                          capture_output=True).returncode == 0:
+            self.skipTest("system interpreter already has the dependencies")
+        result = subprocess.run([str(bare), "-I", str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(self.mix)],
+                                cwd=self.dir, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        lines = result.stderr.strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"missing Python module '(numpy|soundfile|mido|defusedxml)'")
+        self.assertIn(str((SKILL / "requirements.txt").resolve()), lines[0])
+        self.assertIn("venv", lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()
