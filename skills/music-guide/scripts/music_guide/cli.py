@@ -67,13 +67,16 @@ def _merge(target: Evidence, staged: Evidence) -> None:
     target.diagnostics.extend(staged.diagnostics)
 
 
-def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path | None) -> Evidence:
+def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None) -> Evidence:
     evidence = Evidence(limitations=[
         "WAV sample peak is not true peak; RMS is not LUFS.",
         "MIDI, SOLNA and DAWproject describe stored intent, not rendered sound.",
         "No semantic listening, key estimation, genre classification or artwork generation is performed.",
     ])
-    for role, path in [("mixdown", mixdown), *optionals]:
+    if mixdown is None:
+        evidence.diagnostics.append(Diagnostic("no_mixdown", "info",
+            "No mixdown was supplied, so the rendered sound is unknown. Only stored intent and any stem measurements are available."))
+    for role, path in [*([("mixdown", mixdown)] if mixdown else []), *optionals]:
         source_id = f"s{len(evidence.sources) + 1}"
         adapter_name = role if role in ADAPTERS else "unsupported"
         source = Source(source_id, path.name, role, adapter_name, "ok", None)
@@ -123,9 +126,9 @@ def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path |
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Extract local music evidence as JSON")
-    parser.add_argument("--mixdown", required=True, type=Path, help="Readable WAV PCM or IEEE float mixdown")
+    parser.add_argument("--mixdown", type=Path, help="Rendered mixdown audio; without it only stored intent is analyzed")
     parser.add_argument("--midi", action="append", type=Path, default=[])
-    parser.add_argument("--stem", action="append", type=Path, default=[], help="Optional WAV stem; measured independently")
+    parser.add_argument("--stem", action="append", type=Path, default=[], help="Stem audio; measured independently")
     parser.add_argument("--solna", action="append", type=Path, default=[])
     parser.add_argument("--dawproject", action="append", type=Path, default=[])
     parser.add_argument("--project", action="append", type=Path, default=[], help="Unsupported native project to inventory")
@@ -133,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     optionals = [(kind, path) for kind in ("stem", "midi", "solna", "dawproject", "project")
                  for path in getattr(args, kind)]
+    if args.mixdown is None and not optionals:
+        parser.error("supply at least one input: --mixdown, --stem, --midi, --solna, --project or --dawproject")
     try:
         result = build(args.mixdown, optionals, args.declarations)
         print(json.dumps(result.as_json(), ensure_ascii=False, allow_nan=False, indent=2))

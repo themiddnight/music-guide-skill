@@ -27,13 +27,14 @@ class MusicGuideTest(unittest.TestCase):
         self.mix = self.dir / "mix.wav"
         sf.write(self.mix, np.array([0.5, -0.5, 0.25, -0.25], dtype="float32"), 48000, subtype="FLOAT")
 
-    def run_cli(self, *args, script=None):
+    def run_cli(self, *args, script=None, mixdown=True):
+        prefix = ["--mixdown", str(self.mix)] if mixdown else []
         return subprocess.run([sys.executable, str(script or SKILL / "scripts" / "analyze.py"),
-                               "--mixdown", str(self.mix), *map(str, args)], cwd=self.dir,
+                               *prefix, *map(str, args)], cwd=self.dir,
                               text=True, capture_output=True)
 
-    def evidence(self, *args):
-        result = self.run_cli(*args)
+    def evidence(self, *args, mixdown=True):
+        result = self.run_cli(*args, mixdown=mixdown)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         data = json.loads(result.stdout)
@@ -268,6 +269,36 @@ class MusicGuideTest(unittest.TestCase):
                 facts = {item["property"]: item["value"] for item in data["observations"]}
                 self.assertEqual(facts["audio.channels"], 2)
                 self.assertAlmostEqual(facts["audio.rms"], -6.020599913, places=7)
+
+    def write_midi(self, name, *tracks, ticks_per_beat=480):
+        path = self.dir / name
+        song = mido.MidiFile(type=1, ticks_per_beat=ticks_per_beat)
+        song.tracks.extend(mido.MidiTrack(track) for track in tracks)
+        song.save(path)
+        return path
+
+    def test_mixdown_is_optional_but_some_input_is_required(self):
+        declarations = self.dir / "declarations.json"
+        declarations.write_text(json.dumps([{"property": "tempo", "value": 120, "unit": "BPM", "scope": "project"}]))
+        for args in ((), ("--declarations", declarations)):
+            with self.subTest(args=args):
+                result = self.run_cli(*args, mixdown=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("usage:", result.stderr)
+                self.assertEqual(result.stdout, "")
+        midi_path = self.write_midi("only.mid", [mido.Message("note_on", note=60, velocity=80),
+                                                 mido.Message("note_off", note=60, time=480)])
+        data = self.evidence("--midi", midi_path, mixdown=False)
+        self.assertEqual([item["role"] for item in data["sources"]], ["midi"])
+        self.assertFalse(any(item["property"].startswith("audio.") for item in data["observations"]))
+        notice = [item for item in data["diagnostics"] if item["code"] == "no_mixdown"]
+        self.assertEqual(len(notice), 1)
+        self.assertEqual(notice[0]["severity"], "info")
+        self.assertIn("rendered", notice[0]["message"])
+        with_mix = self.evidence("--midi", midi_path)
+        self.assertFalse(any(item["code"] == "no_mixdown" for item in with_mix["diagnostics"]))
+        self.mix.unlink()
+        self.assertEqual(self.run_cli("--midi", midi_path).returncode, 2)
 
 
 if __name__ == "__main__":
