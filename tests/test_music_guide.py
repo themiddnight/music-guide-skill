@@ -504,8 +504,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.PTF", b"x", "pro-tools-session", "AAF"),
             ("song.bwproject", b"BtWg", "bitwig-project", "File > Export > DAWproject"),
             ("song.reason", b"x", "reason-song", "MIDI"),
-            ("song.cpr", b"RIFF", "cubase-project", "Cubase 14"),
-            ("song.npr", b"RIFF", "cubase-project", "DAWproject"),
             ("song.als", gzip.compress(b"<Ableton/>"), "ableton-als", "Export Audio/Video"),
             ("song.rpp", b"\xef\xbb\xbf<REAPER_PROJECT 0.1", "reaper-rpp", "MIDI"),
             ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),

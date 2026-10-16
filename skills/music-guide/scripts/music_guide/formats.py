@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from .adapters import dawproject, midi, solna
-from .adapters import flstudio, studioone
+from .adapters import cubase, flstudio, studioone
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -63,7 +63,8 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Export a mixdown and stems, and the MIDI regions as a MIDI file."),
     ProjectFormat("garageband-package", "GarageBand project", (".band",), "directory", MAX_ZIP_BYTES, _any, None,
                   "Export the song to disk as WAV or AIFF. GarageBand cannot export MIDI; Logic Pro can open the project to do so."),
-    ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, _any, None,
+    ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, cubase.detect,
+                  cubase.cubase,
                   "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown."),
     ProjectFormat("ableton-als", "Ableton Live set", (".als",), "file", MAX_ZIP_BYTES, _signature(b"\x1f\x8b"), None,
                   "Export a mixdown and stems with File > Export Audio/Video, and MIDI clips as MIDI files."),

@@ -18,7 +18,7 @@ SKILL = ROOT / "skills" / "music-guide"
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 sys.path.insert(0, str(SKILL / "scripts"))
 
-from music_guide.adapters import flstudio, studioone  # noqa: E402
+from music_guide.adapters import cubase, flstudio, studioone  # noqa: E402
 
 
 class ProjectCliTest(unittest.TestCase):
@@ -380,6 +380,10 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.track_count"), [3])
         self.assertEqual(self.project(self.write(song=song_xml(declare=False)), "--declarations",
                                       self.declare_tempo(120))["conflicts"], [])
+        cpp_names = song_xml(declare=False).replace(
+            '<FolderTrack name="Group"/>', '<FolderTrack name="Group"><ProcessGraph::SlotNode x:id="n" ns:flag="a b=c"/></FolderTrack>')
+        data = self.project(self.write("cpp.song", song=cpp_names))
+        self.assertEqual((data["sources"][0]["status"], self.values(data, "project.track_count")), ("ok", [3]))
 
     def test_rejects_malformed_and_unsafe_archives(self):
         self.assert_rejected(self.write("no-song.song", **{"Song/song.xml": None}), "does not match")
@@ -405,6 +409,191 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.media_reference"), [])
         self.assertEqual(len([item for item in data["diagnostics"] if item["code"] == "studioone_part_unreadable"]), 2)
         self.assertEqual(len(self.values(data, "project.track")), 3)
+
+
+def cm(value, bom=False):
+    body = value.encode() + b"\0" + (b"\xef\xbb\xbf" if bom else b"")
+    return struct.pack(">I", len(body)) + body
+
+
+def container(name, version=0):
+    return b"\xff\xff\xff\xfe" + cm(name) + struct.pack(">H", version)
+
+
+def obj(name, payload=b"", version=0):
+    return b"\xff\xff\xff\xff" + cm(name) + struct.pack(">HI", version, len(payload)) + payload
+
+
+def riff(chunks, tag=b"NUND"):
+    body = b"".join(chunks)
+    return b"RIFF" + struct.pack(">I", len(body) - 4) + tag + body
+
+
+def pair(name, kind, arch):
+    root = cm(name) + cm(kind)
+    return [b"ROOT" + struct.pack(">I", len(root)) + root, b"ARCH" + struct.pack(">I", len(arch)) + arch]
+
+
+def app_version(arch=None, name="Cubase", version="Version 12.0.50", extended=True):
+    payload = cm(name) + cm(version) + cm("Mar 30 2022") + struct.pack(">I", 400)
+    if extended:
+        payload += cm("WIN64") + struct.pack(">I", 0) + cm("UTF-8") + cm("us")
+    return container("CmObject") + obj("PAppVersion", payload, 512)
+
+
+def attribute(attribute_id, kind, value):
+    record = b"\x00\x14" + cm("StMedia::PStringIDMediaAttribute") + bytes(8)
+    names = [("ID", b"\x00\x08" + cm(attribute_id)), ("Type", b"\x00\x01" + struct.pack(">q", 4)),
+             ("Flags", b"\x00\x01" + struct.pack(">q", 2)), (kind, value)]
+    return record + struct.pack(">I", len(names)) + b"".join(cm(name) + payload for name, payload in names)
+
+
+def metadata(rate=44100.0, tempo=120.0, signature=(3, 4)):
+    nested = (b"\x00\x14" + cm("CmRational") + bytes(8) + struct.pack(">I", 2) + cm("Numerator")
+              + b"\x00\x01" + struct.pack(">q", signature[0]) + cm("Denominator") + b"\x00\x01"
+              + struct.pack(">q", signature[1]))
+    records = (attribute("AudioSampleRate", "Float", b"\x00\x04" + struct.pack(">d", rate))
+               + attribute("MediaProjectName", "String", b"\x00\x08" + cm("Demo", bom=True))
+               + attribute("MusicalSignature", "Object", b"\x00\x02" + nested)
+               + attribute("MusicalTempo", "Float", b"\x00\x04" + struct.pack(">d", tempo)))
+    return container("CmObject") + obj("StMedia::PAttributes", b"\x00\x00\x00\x01" + records)
+
+
+def track_header(reference_to_base, class_reference, name):
+    return class_reference + struct.pack(">I", 99) + bytes(10) + reference_to_base + struct.pack(">I", 77) + cm(name, bom=True)
+
+
+def arrangement(names=(("Lead", "MAudioTrackEvent"), ("Second", "MAudioTrackEvent"), ("Keys", "MInstrumentTrackEvent"),
+                       ("Chords", "MMidiTrackEvent"), ("Bus", "MDeviceTrackEvent"))):
+    """Class definitions come first and later tracks refer back to them, as in real projects."""
+    prefix = container("MGroupEvent") + container("MListNode") + container("MDataNode")
+    base = len(prefix) - len(container("MDataNode")) - len(container("MListNode"))
+    stream = bytearray(prefix)
+    offsets = {}
+    for _, class_name in names:
+        if class_name not in offsets:
+            offsets[class_name] = len(stream)
+            stream += container(class_name)
+    base_ref = struct.pack(">I", 0x80000000 | base)
+    body = bytearray()
+    for name, class_name in names:
+        body += track_header(base_ref, struct.pack(">I", 0x80000000 | offsets[class_name]), name)
+        body += struct.pack(">I", 12) + b"Plugin Name\0" + b"\x00\x08" + cm("Pro EQ", bom=True)
+        body += cm(f"{name} 1.wav", bom=True) + cm("wav", bom=True)
+        body += cm("D:\\Secret\\Audio\\" + f"{name} 2.WAV", bom=True)
+    inline = obj("MAudioTrackEvent", b"\x00\x01" + track_header(base_ref, b"\x00\x00\x00\x00", "Inline") + bytes(8))
+    stream += inline + bytes(body)
+    return bytes(stream)
+
+
+class CubaseTest(ProjectCliTest):
+    def write(self, name="song.cpr", version=None, meta=None, arrange=None, extra=()):
+        chunks = pair("Version", "PAppVersion", version if version is not None else app_version())
+        chunks += pair("Arrangement1", "PArrangement", arrange if arrange is not None else arrangement())
+        chunks += pair("Metadata", "StMedia::PAttributes", meta if meta is not None else metadata())
+        for item in extra:
+            chunks += item
+        path = self.dir / name
+        path.write_bytes(riff(chunks))
+        return path
+
+    def test_application_and_media_attributes_are_structural(self):
+        data = self.project(self.write())
+        self.assertEqual((data["sources"][0]["adapter"], data["sources"][0]["status"]), ("cubase-project", "ok"))
+        application = self.items(data, "project.application")[0]
+        self.assertEqual((application["value"], application["confidence"]), ("Cubase 12.0.50", "high"))
+        self.assertEqual(self.values(data, "cubase.app_version"), [{
+            "name": "Cubase", "version": "Version 12.0.50", "buildDate": "Mar 30 2022", "architecture": "WIN64",
+            "encoding": "UTF-8", "locale": "us"}])
+        self.assertEqual([item["name"] for item in self.values(data, "cubase.root_chunks")[0]], ["Version", "Arrangement1", "Metadata"])
+        attributes = {item["id"]: item["value"] for item in self.values(data, "cubase.media_attribute")}
+        self.assertEqual(attributes, {"AudioSampleRate": 44100.0, "MediaProjectName": "Demo",
+                                      "MusicalSignature": {"Numerator": 3, "Denominator": 4}, "MusicalTempo": 120.0})
+        self.assertEqual([(item["value"], item["confidence"]) for item in self.items(data, "project.sample_rate")],
+                         [(44100, "medium")])
+        self.assertEqual([(item["value"], item["confidence"]) for item in self.items(data, "tempo")], [(120.0, "low")])
+        self.assertEqual([(item["value"], item["confidence"]) for item in self.items(data, "meter")], [("3/4", "low")])
+        self.assertIn("tempo and signature tracks", self.items(data, "tempo")[0]["confidenceReason"])
+        self.assertTrue(any(item["code"] == "cubase_partial_decoding" for item in data["diagnostics"]))
+
+    def test_pattern_matched_facts_are_low_confidence_and_say_why(self):
+        data = self.project(self.write())
+        tracks = {item["value"]["index"]: item["value"] for item in self.items(data, "project.track")}
+        self.assertEqual([(track["name"], track["kind"]) for track in tracks.values()], [
+            ("Inline", "audio"), ("Lead", "audio"), ("Second", "audio"), ("Keys", "instrument"), ("Chords", "midi"),
+            ("Bus", "unknown")])
+        self.assertEqual(self.values(data, "project.track_count"), [6])
+        self.assertEqual(self.values(data, "cubase.track_classes"), [["MAudioTrackEvent", "MDeviceTrackEvent",
+                                                                       "MInstrumentTrackEvent", "MMidiTrackEvent"]])
+        for property in ("project.track", "project.track_count", "project.plugin", "project.media_reference",
+                         "cubase.track_class", "cubase.plugin_mentions"):
+            for item in self.items(data, property):
+                self.assertEqual(item["confidence"], "low", property)
+        self.assertIn("byte pattern", self.items(data, "project.track")[0]["confidenceReason"])
+        self.assertEqual(self.values(data, "cubase.plugin_mentions"), [{"name": "Pro EQ", "count": 5}])
+        self.assertEqual(self.values(data, "project.plugin"), [{"name": "Pro EQ", "track": None}])
+        references = {item["value"]["basename"]: item["value"]["count"] for item in self.items(data, "project.media_reference")}
+        self.assertEqual(references, {f"{name} {number}.{ext}": 1 for name in ("Lead", "Second", "Keys", "Chords", "Bus")
+                                      for number, ext in ((1, "wav"), (2, "WAV"))})
+        self.assertNotIn("Secret", json.dumps(data))
+
+    def test_tempo_conflicts_with_declaration(self):
+        data = self.project(self.write(), "--declarations", self.declare_tempo(140))
+        self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
+
+    def test_deeper_failures_keep_the_application(self):
+        cases = {
+            "metadata": dict(meta=metadata()[:-5]),
+            "no-metadata-records": dict(meta=container("CmObject")),
+            "garbage-arrangement": dict(arrange=bytes(range(256)) * 20),
+            "empty-arrangement": dict(arrange=b""),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name=name):
+                data = self.project(self.write(f"{name}.cpr", **kwargs))
+                self.assertEqual(data["sources"][0]["status"], "ok")
+                self.assertEqual(self.values(data, "project.application"), ["Cubase 12.0.50"])
+                codes = {item["code"] for item in data["diagnostics"]}
+                self.assertTrue(codes & {"cubase_deep_parse_failed", "cubase_no_tracks_found"}, codes)
+        data = self.project(self.write("old.cpr", version=app_version(extended=False)))
+        self.assertEqual(self.values(data, "cubase.app_version")[0], {"name": "Cubase", "version": "Version 12.0.50",
+                                                                       "buildDate": "Mar 30 2022"})
+
+    def test_rejects_malformed_oversized_and_mislabeled_files(self):
+        complete = self.write().read_bytes()
+        cases = {
+            "cut.cpr": (complete[:200], "truncated or corrupt"),
+            "header-cut.cpr": (complete[:12 + 5], "truncated"),
+            "oversized.cpr": (complete[:12] + b"ROOT" + struct.pack(">I", 2**31) + b"x" * 8, "declares"),
+            "oversized-string.cpr": (riff(pair("Version", "PAppVersion", container("CmObject") + obj(
+                "PAppVersion", struct.pack(">I", 2**30) + b"Cubase\0"))), "declares"),
+            "no-version.cpr": (riff(pair("Arrangement1", "PArrangement", arrangement())), "no Version chunk"),
+            "not-app-version.cpr": (riff(pair("Version", "PAppVersion", container("CmObject"))), "PAppVersion"),
+            "bad-tag.cpr": (riff([b"\x00\x01\x02\x03" + struct.pack(">I", 0)]), "invalid tag"),
+        }
+        for name, (content, fragment) in cases.items():
+            with self.subTest(name=name):
+                (self.dir / name).write_bytes(content)
+                self.assert_rejected(self.dir / name, fragment)
+        for name, content in {"plain.cpr": b"RIFF", "wave.npr": b"RIFF\0\0\0\0WAVEfmt ", "text.cpr": b"hello"}.items():
+            (self.dir / name).write_bytes(content)
+            data = self.project(self.dir / name)
+            self.assertEqual(data["sources"][0]["status"], "error", name)
+            self.assertIn("does not match", self.error_message(data), name)
+
+    def test_npr_extension_and_detect(self):
+        path = self.write("song.npr", version=app_version(name="Nuendo", version="Version 12.0.70"))
+        self.assertTrue(cubase.detect(path))
+        data = self.project(path)
+        self.assertEqual(self.values(data, "project.application"), ["Nuendo 12.0.70"])
+        path.write_bytes(b"RIFF\0\0\0\0NUNX")
+        self.assertFalse(cubase.detect(path))
+
+    def test_hostile_object_stream_is_bounded_and_keeps_the_application(self):
+        data = self.project(self.write(arrange=b"\xff" * (cubase.MAX_SCAN_HITS + 10)))
+        self.assertEqual(self.values(data, "project.application"), ["Cubase 12.0.50"])
+        self.assertTrue(any(item["code"] == "cubase_deep_parse_failed" and "too many candidate" in item["message"]
+                            for item in data["diagnostics"]))
 
 
 if __name__ == "__main__":
