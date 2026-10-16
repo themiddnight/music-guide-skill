@@ -16,9 +16,9 @@ Malformed inputs must not become confident facts. Silence must produce valid JSO
 
 ## Tasks
 
-- [ ] Build typed evidence records and canonical JSON schemas. Tests assert source links, provenance, confidence, and conflicts.
-- [ ] Implement audio, MIDI, SOLNA, and bounded DAWproject metadata adapters. Tests use generated fixtures and invalid inputs.
-- [ ] Implement CLI orchestration, optional-source diagnostics, declarations, and conservative conflict detection. Drive CLI from an unrelated directory.
-- [ ] Write skill routing and references for every requested intent and domain, including missing-audio and conflict behavior.
-- [ ] Add host manifests, safe installer, requirements/config, and README installation, usage, limits, and roadmap.
-- [ ] Run test suite, schema/package validation, and copied-skill CLI checks. Independently review, fix accepted findings, rerun affected checks, and commit locally.
+- [x] Build typed evidence records and canonical JSON schemas. Tests assert source links, provenance, confidence, and conflicts.
+- [x] Implement audio, MIDI, SOLNA, and bounded DAWproject metadata adapters. Tests use generated fixtures and invalid inputs.
+- [x] Implement CLI orchestration, optional-source diagnostics, declarations, and conservative conflict detection. Drive CLI from an unrelated directory.
+- [x] Write skill routing and references for every requested intent and domain, including missing-audio and conflict behavior.
+- [x] Add host manifests, safe installer, requirements/config, and README installation, usage, limits, and roadmap.
+- [x] Run test suite, schema/package validation, and copied-skill CLI checks. Independently review, fix accepted findings, rerun affected checks, and commit locally.

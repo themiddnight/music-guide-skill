@@ -260,6 +260,15 @@ class MusicGuideTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertTrue(target.is_symlink())
 
+    def test_wave_extensible_pcm_and_float(self):
+        for subtype in ("PCM_24", "FLOAT"):
+            with self.subTest(subtype=subtype):
+                sf.write(self.mix, np.full((32, 2), 0.5), 48000, format="WAVEX", subtype=subtype)
+                data = self.evidence()
+                facts = {item["property"]: item["value"] for item in data["observations"]}
+                self.assertEqual(facts["audio.channels"], 2)
+                self.assertAlmostEqual(facts["audio.rms"], -6.020599913, places=7)
+
 
 if __name__ == "__main__":
     unittest.main()

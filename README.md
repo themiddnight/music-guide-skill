@@ -12,7 +12,7 @@ python3 -m venv .venv
 .venv/bin/python skills/music-guide/scripts/analyze.py --mixdown song.wav > evidence.json
 ```
 
-WAV PCM and IEEE float are guaranteed. Decoding uses libsndfile through `soundfile`; supported integer and float WAV subtypes are checked. No other audio codec is promised. Sample peak and RMS use decoded sample values. Silence produces `null` dBFS values and a diagnostic. Samples at or above full scale are only a potential clipping signal.
+WAV PCM and IEEE float are guaranteed, including WAVE Extensible headers. Decoding uses libsndfile through `soundfile`; supported integer and float WAV subtypes are checked. No other audio codec is promised. Sample peak and RMS use decoded sample values. Silence produces `null` dBFS values and a diagnostic. Samples at or above full scale are only a potential clipping signal.
 
 Optional inputs, including independently measured WAV stems:
 
@@ -62,7 +62,7 @@ The [format contract](skills/music-guide/references/formats.md) lists accepted i
 
 MIDI SMF 0/1 records stored tempo and meter events, track names, paired notes, ticks and beats. Type 2 and SMPTE timing are explicitly unsupported. SOLNA extraction is limited to inspected version 12 and earlier with the same validated shape: project BPM/meter ID, loop scales, and chord fields. It does not decode patterns or emulate rendering. DAWproject reads bounded `project.xml` metadata for version, transport settings, and track count/names; it does not reconstruct nested event timing or media. Proprietary Logic, Cubase, FL Studio, and Ableton sessions need WAV and optional standard exports.
 
-Current validation uses generated fixtures on macOS. Real source projects, other operating systems, and host discovery beyond local CLI checks need separate verification. Future work includes real-world fixtures with permission, broader codecs, dedicated LUFS/true-peak measurement, uncertain key/tempo estimation, and deeper DAWproject event timing.
+Current validation uses generated fixtures and three user-provided reference sets on macOS, including native Codex and Claude Code installation in isolated profiles. Committed fixtures are synthetic. Broader source-project coverage, other operating systems, and end-to-end model response quality need separate verification. See the [verification record](docs/verification.md) for commands, coverage, and remaining limits. Future work includes real-world fixtures with permission, broader codecs, dedicated LUFS/true-peak measurement, uncertain key/tempo estimation, and deeper DAWproject event timing.
 
 See the [input contract and adapter extension guide](skills/music-guide/references/formats.md) for parser limits and how to add support. Packaging follows the [OpenAI plugin packaging guide](https://developers.openai.com/plugins/build/plugins), with a portable root manifest and Codex compatibility metadata. The [DAWproject specification](https://github.com/bitwig/dawproject) defines the source container and XML fields.
 

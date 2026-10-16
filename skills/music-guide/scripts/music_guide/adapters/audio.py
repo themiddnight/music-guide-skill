@@ -12,7 +12,7 @@ def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown"
     if path.stat().st_size > MAX_AUDIO_BYTES:
         raise ValueError("mixdown exceeds 4 GiB limit")
     with sf.SoundFile(path) as file:
-        if file.format != "WAV" or not (file.subtype.startswith("PCM_") or file.subtype in {"FLOAT", "DOUBLE"}):
+        if file.format not in {"WAV", "WAVEX"} or not (file.subtype.startswith("PCM_") or file.subtype in {"FLOAT", "DOUBLE"}):
             raise ValueError("WAV subtype must be PCM or IEEE float")
         if file.frames <= 0 or file.channels <= 0 or file.samplerate <= 0:
             raise ValueError("mixdown has no readable audio frames")
