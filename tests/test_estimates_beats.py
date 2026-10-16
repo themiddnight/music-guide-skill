@@ -209,12 +209,23 @@ class SwingTest(unittest.TestCase):
                 swing = beats.swing(store, grid)
                 self.assertIsInstance(swing, beats.Swing)
                 self.assertAlmostEqual(swing.ratio, ratio, delta=0.15 * ratio)
-        for hats in (((0.25, 0.15), (0.5, 0.2), (0.75, 0.35)), ((0.25, 0.3), (0.5, 0.3), (0.75, 0.3))):
+        # Swung sixteenths at 2:1 and eighth-note triplets put competing peaks off the straight sixteenth grid.
+        for hats in (((1 / 3, 0.3), (0.5, 0.3), (5 / 6, 0.3)), ((1 / 3, 0.3), (2 / 3, 0.3))):
             with self.subTest(hats=hats):
                 store, grid = grid_of(with_hats(100, hats)[0])
                 swing = beats.swing(store, grid)
                 self.assertIsInstance(swing, Skip)
                 self.assertIn("subdivision is ambiguous", swing.reason)
+
+    def test_straight_sixteenths_read_as_straight(self):
+        for hats in (((0.25, 0.15), (0.5, 0.2), (0.75, 0.35)), ((0.25, 0.3), (0.5, 0.3), (0.75, 0.3))):
+            with self.subTest(hats=hats):
+                store, grid = grid_of(with_hats(100, hats)[0])
+                swing = beats.swing(store, grid)
+                self.assertIsInstance(swing, beats.Swing)
+                self.assertEqual(swing.ratio, 1.0)
+                self.assertGreaterEqual(swing.pairs, 16)
+                self.assertIn("straight sixteenths", swing.method.reason)
 
     def test_beats_without_offbeats_skip_swing(self):
         samples, _, _ = click_track(120, 4, 30)

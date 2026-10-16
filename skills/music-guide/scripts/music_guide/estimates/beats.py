@@ -66,6 +66,9 @@ OFFBEAT_SHARE = 0.2
 SUB_BEAT_BINS = 48
 DISTINCT_PEAK_SHARE = 0.75
 SWING_SEARCH = (0.2, 0.85)
+# Competing peaks all this close to a straight sixteenth read as straight. A peak sits within half a bin of its true
+# position, so this allows one bin either way; sixteenths swung 1.5:1 put the first peak 0.05 early.
+SIXTEENTHS, SIXTEENTH_TOLERANCE = (0.25, 0.5, 0.75), 0.03
 
 TEMPO_METHOD = Method("onset-autocorrelation",
                       "top autocorrelation peaks of a spectral-flux onset envelope within 60-200 BPM, using FFT"
@@ -160,9 +163,15 @@ METER_METHOD = Method("accent-pattern-meter",
                       " without accents can shift the downbeat.")
 SWING_METHOD = Method("offbeat-onset-position",
                       "median long-to-short ratio of the strongest onset between consecutive beats, counted only at"
-                      " 40-80% of the beat. It skips when the mean onset pattern between beats has two similar peaks,"
-                      " such as straight or swung sixteenths, because the subdivision is then ambiguous. A shuffle"
-                      " felt against a half-time grid and loose timing are not told apart.")
+                      " 40-80% of the beat. It skips when the mean onset pattern between beats has two similar peaks"
+                      " off the straight sixteenth grid, such as swung sixteenths or triplets, because the"
+                      " subdivision is then ambiguous. A shuffle felt against a half-time grid and loose timing are"
+                      " not told apart.")
+STRAIGHT_METHOD = Method("sixteenth-grid-onsets",
+                         "the mean onset pattern between beats has similar peaks only at the straight sixteenth"
+                         f" positions (0.25, 0.5 and 0.75 of the beat, within {SIXTEENTH_TOLERANCE:g}), so the ratio is"
+                         " 1.0: straight sixteenths. Sixteenths swung less than about 1.3:1 also land on that grid;"
+                         " a shuffle felt against a half-time grid and loose timing are not told apart.")
 
 
 @dataclass(frozen=True)
@@ -370,7 +379,9 @@ def _sub_beat_peaks(flux: np.ndarray, rate: float, times: np.ndarray) -> list[fl
 def swing(store: FeatureStore, beats: BeatGrid) -> Swing | Skip:
     flux, rate = store.flux, store.onset_rate
     peaks = _sub_beat_peaks(flux, rate, beats.times)
-    if len(peaks) > 1:
+    straight = len(peaks) > 1 and all(min(abs(peak - grid) for grid in SIXTEENTHS) <= SIXTEENTH_TOLERANCE
+                                      for peak in peaks)
+    if len(peaks) > 1 and not straight:
         where = ", ".join(f"{peak:.2f}" for peak in peaks)
         return Skip(f"the onsets between beats peak at {where} of the beat with similar strength, so the subdivision"
                     " is ambiguous and a long-to-short ratio would depend on which peak is read.")
@@ -392,4 +403,4 @@ def swing(store: FeatureStore, beats: BeatGrid) -> Swing | Skip:
     ratio = rhythm.swing_ratio(positions)
     if ratio is None or pairs < MIN_SWING_PAIRS:
         return Skip(f"only {pairs} beats have a distinct off-beat onset; swing needs {MIN_SWING_PAIRS}.")
-    return Swing(ratio, pairs)
+    return Swing(1.0, pairs, STRAIGHT_METHOD) if straight else Swing(ratio, pairs)
