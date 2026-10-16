@@ -59,7 +59,7 @@ def render(outcomes: list[tuple[str, Outcome]], ctx: ReportContext) -> tuple[lis
     diagnostics: list[Diagnostic] = []
     for label, outcome in outcomes:
         if isinstance(outcome, Skip):
-            severity = "warning" if outcome.code == "estimate_failed" else "info"
+            severity: Literal["info", "warning"] = "warning" if outcome.code == "estimate_failed" else "info"
             diagnostics.append(Diagnostic(outcome.code, severity, f"No {label}: {outcome.reason}"))
             continue
         try:

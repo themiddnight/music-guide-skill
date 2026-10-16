@@ -34,8 +34,6 @@ class Method:
     reason: str
 
 
-
-
 @dataclass(frozen=True)
 class Report:
     """What a result reports: its facts, and the cuts each fact made, which become truncation diagnostics."""

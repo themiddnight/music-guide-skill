@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy import signal
@@ -154,7 +155,7 @@ class BeatGrid:
     method: Method = BEAT_METHOD
 
     def report(self, ctx: ReportContext) -> Report:
-        value = {"bpm": round(self.bpm, 1), "beatCount": len(self.times),
+        value: dict[str, Any] = {"bpm": round(self.bpm, 1), "beatCount": len(self.times),
                  "firstBeatSeconds": round(float(self.times[0]), 3), "tempoStability": round(self.stability, 3)}
         limit = None
         if ctx.full:
