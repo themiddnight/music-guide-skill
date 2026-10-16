@@ -12,20 +12,15 @@ from xml.etree import ElementTree as ET
 import soundfile as sf
 from defusedxml.common import DefusedXmlException
 
-from .adapters import audio, dawproject, midi, solna
-from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES, _read_bounded
+from . import formats
+from .adapters import audio
+from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_ZIP_BYTES, _read_bounded
+from .formats import ProjectFormat
 from .model import Detail, Diagnostic, Evidence, Source, detect_conflicts
 
-ADAPTERS = {
-    "mixdown": audio.audio,
-    "stem": audio.audio,
-    "midi": midi.midi,
-    "solna": solna.solna,
-    "dawproject": dawproject.dawproject,
-}
-LIMITS = {"mixdown": MAX_AUDIO_BYTES, "stem": MAX_AUDIO_BYTES,
-          "midi": MAX_MIDI_BYTES, "solna": MAX_JSON_BYTES,
-          "dawproject": MAX_ZIP_BYTES}
+AUDIO_ROLES = ("mixdown", "stem")
+# Explicit flags name their format, so their files skip extension and signature detection.
+FLAG_FORMATS = {"midi": "midi", "solna": "solna", "dawproject": "dawproject"}
 
 
 def _hash(path: Path) -> str:
@@ -67,11 +62,32 @@ def _merge(target: Evidence, staged: Evidence) -> None:
     target.diagnostics.extend(staged.diagnostics)
 
 
+def _require_file(path: Path, limit: int) -> None:
+    if not path.is_file():
+        raise ValueError("source is not a readable regular file")
+    if path.stat().st_size > limit:
+        raise ValueError(f"source exceeds {limit} byte limit")
+
+
+def _inventory(path: Path, fmt: ProjectFormat | None, source: Source, evidence: Evidence) -> None:
+    if not (path.is_file() or path.is_dir()):
+        raise ValueError("source is not a regular file or package directory")
+    limit = fmt.byte_limit if fmt else MAX_ZIP_BYTES
+    if path.is_file() and path.stat().st_size <= limit:
+        source.sha256 = _hash(path)
+    source.status = "unsupported"
+    if fmt is None:
+        message = f"{path.name}: unrecognized project format, inventoried only. {formats.GENERIC_GUIDANCE}"
+    else:
+        message = f"{path.name}: {fmt.label} files are inventoried, not parsed. {fmt.guidance}"
+    evidence.diagnostics.append(Diagnostic("unsupported_project", "warning", message, source.id))
+
+
 def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None,
           detail: Detail = "summary") -> Evidence:
     evidence = Evidence(limitations=[
         "WAV sample peak is not true peak; RMS is not LUFS.",
-        "MIDI, SOLNA and DAWproject describe stored intent, not rendered sound.",
+        "MIDI and project files describe stored intent, not rendered sound.",
         "No semantic listening, key estimation, genre classification or artwork generation is performed.",
     ])
     if mixdown is None:
@@ -79,31 +95,28 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
             "No mixdown was supplied, so the rendered sound is unknown. Only stored intent and any stem measurements are available."))
     for role, path in [*([("mixdown", mixdown)] if mixdown else []), *optionals]:
         source_id = f"s{len(evidence.sources) + 1}"
-        adapter_name = role if role in ADAPTERS else "unsupported"
-        source = Source(source_id, path.name, role, adapter_name, "ok", None)
+        source = Source(source_id, path.name, role, role if role in AUDIO_ROLES else "unsupported", "ok", None)
         evidence.sources.append(source)
         try:
-            if role == "project":
-                if not path.exists():
-                    raise ValueError("source does not exist")
-                if not (path.is_file() or path.is_dir()):
-                    raise ValueError("source is not a regular file or package directory")
-                if path.is_file() and path.stat().st_size <= MAX_ZIP_BYTES:
-                    source.sha256 = _hash(path)
-                source.status = "unsupported"
-                evidence.diagnostics.append(Diagnostic("unsupported_project", "warning",
-                    f"{path.name}: unsupported native project. Export a WAV mixdown and, if available, MIDI or DAWproject metadata.", source_id))
+            if not path.exists():
+                raise ValueError("source does not exist")
+            if role in AUDIO_ROLES:
+                _require_file(path, MAX_AUDIO_BYTES)
+                source.sha256 = _hash(path)
+                staged = Evidence()
+                audio.audio(path, source_id, staged, scope="mixdown" if role == "mixdown" else f"stem:{source_id}")
+                _merge(evidence, staged)
                 continue
-            if not path.is_file():
-                raise ValueError("source is not a readable regular file")
-            if path.stat().st_size > LIMITS[role]:
-                raise ValueError(f"source exceeds {LIMITS[role]} byte limit")
+            fmt = formats.BY_NAME[FLAG_FORMATS[role]] if role in FLAG_FORMATS else formats.resolve(path)
+            if fmt is not None:
+                source.adapter = fmt.name
+            if fmt is None or fmt.adapter is None:
+                _inventory(path, fmt, source, evidence)
+                continue
+            _require_file(path, fmt.byte_limit)
             source.sha256 = _hash(path)
             staged = Evidence()
-            if role == "stem":
-                audio.audio(path, source_id, staged, scope=f"stem:{source_id}")
-            else:
-                ADAPTERS[role](path, source_id, staged, detail)
+            fmt.adapter(path, source_id, staged, detail)
             _merge(evidence, staged)
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, EOFError,
                 sf.LibsndfileError, zipfile.BadZipFile, ET.ParseError, DefusedXmlException,
@@ -131,8 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--midi", action="append", type=Path, default=[])
     parser.add_argument("--stem", action="append", type=Path, default=[], help="Stem audio; measured independently")
     parser.add_argument("--solna", action="append", type=Path, default=[])
-    parser.add_argument("--dawproject", action="append", type=Path, default=[])
-    parser.add_argument("--project", action="append", type=Path, default=[], help="Unsupported native project to inventory")
+    parser.add_argument("--dawproject", action="append", type=Path, default=[], help="DAWproject archive")
+    parser.add_argument("--project", action="append", type=Path, default=[],
+                        help="Project file or package; the format is detected from its extension and content")
     parser.add_argument("--declarations", type=Path, help="Optional JSON array of user-declared facts")
     parser.add_argument("--detail", choices=("summary", "full"), default="summary",
                         help="summary (default) reports one summary per note track; full also lists every note")

@@ -494,6 +494,80 @@ class MusicGuideTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ProjectFacts(Evidence(), "s1", "test", "summary").track(0, "x", "bus", "here")
 
+    def test_project_flag_detects_formats_and_gives_specific_guidance(self):
+        zip_bytes = self.dir / "empty.zip"
+        with zipfile.ZipFile(zip_bytes, "w") as archive:
+            archive.writestr("content.xml", "<a/>")
+        zipped = zip_bytes.read_bytes()
+        inventory = [
+            ("song.ptx", b"\x03\x00anything", "pro-tools-session", "AAF"),
+            ("song.PTF", b"x", "pro-tools-session", "AAF"),
+            ("song.bwproject", b"BtWg", "bitwig-project", "File > Export > DAWproject"),
+            ("song.reason", b"x", "reason-song", "MIDI"),
+            ("song.cpr", b"RIFF", "cubase-project", "Cubase 14"),
+            ("song.npr", b"RIFF", "cubase-project", "DAWproject"),
+            ("song.als", gzip.compress(b"<Ableton/>"), "ableton-als", "Export Audio/Video"),
+            ("song.rpp", b"\xef\xbb\xbf<REAPER_PROJECT 0.1", "reaper-rpp", "MIDI"),
+            ("song.flp", b"FLhd\x06\x00", "fl-studio-flp", "MIDI file"),
+            ("song.song", zipped, "studio-one-song", "DAWproject"),
+            ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),
+            ("song.mmp", b"<lmms-project/>", "lmms-project", "Export MIDI"),
+            ("song.mmpz", b"\x00\x00\x01\x00x", "lmms-project", "Export MIDI"),
+            ("song.aaf", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "aaf", "mixdown"),
+            ("song.omf", b"x", "omf", "mixdown"),
+            ("score.musicxml", b"<score-partwise/>", "musicxml", "MIDI"),
+            ("score.mxl", zipped, "musicxml", "MIDI"),
+            ("score.mscz", zipped, "musescore-mscz", "MIDI"),
+        ]
+        for name, content, adapter, hint in inventory:
+            with self.subTest(name=name):
+                path = self.dir / name
+                path.write_bytes(content)
+                data = self.evidence("--project", path, mixdown=False)
+                source = data["sources"][0]
+                self.assertEqual((source["role"], source["adapter"], source["status"]), ("project", adapter, "unsupported"))
+                self.assertRegex(source["sha256"], "^[0-9a-f]{64}$")
+                warning = next(item for item in data["diagnostics"] if item["code"] == "unsupported_project")
+                self.assertEqual(warning["severity"], "warning")
+                self.assertIn(hint, warning["message"])
+        for name, adapter in (("song.logicx", "logic-package"), ("song.band", "garageband-package")):
+            with self.subTest(name=name):
+                (self.dir / name).mkdir()
+                (self.dir / name / "projectData").write_bytes(b"x")
+                source = self.evidence("--project", self.dir / name, mixdown=False)["sources"][0]
+                self.assertEqual((source["adapter"], source["status"], source["sha256"]), (adapter, "unsupported", None))
+        unknown = self.dir / "song.xyz"
+        unknown.write_bytes(b"x")
+        data = self.evidence("--project", unknown, mixdown=False)
+        self.assertEqual((data["sources"][0]["adapter"], data["sources"][0]["status"]), ("unsupported", "unsupported"))
+        self.assertIn("DAWproject", next(item["message"] for item in data["diagnostics"] if item["code"] == "unsupported_project"))
+
+    def test_project_flag_parses_supported_formats_and_rejects_mismatches(self):
+        project = self.dir / "song.dawproject"
+        with zipfile.ZipFile(project, "w") as archive:
+            archive.writestr("project.xml", '<Project version="1"><Transport><Tempo value="97" unit="bpm"/></Transport></Project>')
+        midi_path = self.write_midi("part.MID", [mido.Message("note_on", note=60, velocity=80),
+                                                 mido.Message("note_off", note=60, time=480)])
+        data = self.evidence("--project", project, "--project", midi_path, mixdown=False)
+        self.assertEqual([(item["role"], item["adapter"], item["status"]) for item in data["sources"]],
+                         [("project", "dawproject", "ok"), ("project", "midi", "ok")])
+        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "tempo"), 97)
+        self.assertTrue(any(item["property"] == "midi.track_summary" for item in data["observations"]))
+        alias = self.evidence("--dawproject", project, mixdown=False)["sources"][0]
+        self.assertEqual((alias["role"], alias["adapter"], alias["status"]), ("dawproject", "dawproject", "ok"))
+        fake = self.dir / "fake.dawproject"
+        fake.write_text("not a zip")
+        packaged_file = self.dir / "flat.logicx"
+        packaged_file.write_bytes(b"x")
+        fake_als = self.dir / "plain.als"
+        fake_als.write_text("<Ableton/>")
+        for path in (fake, packaged_file, fake_als, self.dir / "missing.ptx"):
+            with self.subTest(path=path.name):
+                data = self.evidence("--project", path, mixdown=False)
+                self.assertEqual(data["sources"][0]["status"], "error")
+                self.assertEqual(data["observations"], [])
+                self.assertTrue(any(item["code"] == "optional_source_error" for item in data["diagnostics"]))
+
 
 if __name__ == "__main__":
     unittest.main()

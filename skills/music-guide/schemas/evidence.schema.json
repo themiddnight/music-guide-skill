@@ -34,7 +34,7 @@
         "value": {"type": ["string", "number", "integer", "boolean", "object", "array", "null"]},
         "unit": {"type": "string", "minLength": 1}, "scope": {"type": "string", "minLength": 1},
         "timeDomain": {"type": "string", "minLength": 1,
-          "description": "When the value applies. static: one value for the whole scope. midi_ticks: positioned by MIDI ticks in the locator or value. loop_sequence: ordered within a stored loop. Automatic conflict detection compares static values only."},
+          "description": "When the value applies. static: one value for the whole scope. midi_ticks: positioned by MIDI ticks in the locator or value. project_beats and project_seconds: positioned on a project timeline in quarter-note beats or seconds. loop_sequence: ordered within a stored loop. Automatic conflict detection compares static values only."},
         "locator": {"type": "string", "minLength": 1},
         "method": {"type": "string", "minLength": 1}, "methodVersion": {"type": "string", "minLength": 1},
         "provenance": {"enum": ["measured", "extracted", "inferred", "user_declared"]},
