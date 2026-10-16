@@ -11,7 +11,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from signals import RATE, click_track, record  # noqa: E402
+from signals import RATE, _burst, click_track, record  # noqa: E402
 from support import run_cli  # noqa: E402
 
 from music_guide import rhythm  # noqa: E402
@@ -23,6 +23,18 @@ def grid_of(samples: np.ndarray):
     store = record(samples, RATE, chunk=65536)
     tempo = beats.tempo(store)
     return store, tempo if isinstance(tempo, Skip) else beats.beat_grid(store, tempo)
+
+
+def with_hats(bpm: float, hats: tuple[tuple[float, float], ...], seconds: float = 40) -> tuple[np.ndarray, np.ndarray]:
+    """A 4/4 click track plus short noise hats at (fraction of the beat, gain) inside every beat."""
+    samples, truth, _ = click_track(bpm, 4, seconds)
+    hat = _burst(RATE, None, 0.01, 4)
+    for here, after in zip(truth[:-1], truth[1:]):
+        for fraction, gain in hats:
+            at = int(round((here + fraction * (after - here)) * RATE))
+            part = hat[:len(samples) - at]
+            samples[at:at + len(part)] += 0.4 * gain * part
+    return samples, truth
 
 
 def nearest(truth: np.ndarray, estimate: np.ndarray) -> np.ndarray:
@@ -48,6 +60,44 @@ class BeatGridTest(unittest.TestCase):
         self.assertAlmostEqual(steady_grid.times[0], 1.37, delta=0.03)
         self.assertGreaterEqual(np.mean(nearest(ramp_truth, ramp_grid.times) <= 0.03), 0.9)
         self.assertLess(ramp_grid.stability, steady_grid.stability)
+
+    def test_tempo_prior_only_chooses_an_octave_of_the_strongest_peak(self):
+        cases = ((90, ((0.25, 0.12), (0.5, 0.12), (0.75, 0.12)), 90),
+                 (100, ((0.25, 0.3), (0.5, 0.3), (0.75, 0.3)), 100),
+                 (180, ((0.5, 0.3),), 180))
+        for bpm, hats, expected in cases:
+            with self.subTest(bpm=bpm):
+                samples, truth = with_hats(bpm, hats)
+                _, grid = grid_of(samples)
+                self.assertAlmostEqual(grid.bpm, expected, delta=1)
+                self.assertGreaterEqual(np.mean(nearest(truth, grid.times) <= 0.03), 0.95)
+
+    def test_tempo_range_edges_are_accepted(self):
+        for bpm in (60, 200):
+            with self.subTest(bpm=bpm):
+                samples, _, _ = click_track(bpm, 4, 40)
+                tempo = beats.tempo(record(samples, RATE, chunk=65536))
+                self.assertIsInstance(tempo, beats.TempoCandidates)
+                self.assertTrue(any(abs(candidate - bpm) < 1.5 for candidate, _ in tempo.candidates), tempo)
+        _, grid = grid_of(click_track(60, 4, 40)[0])
+        self.assertAlmostEqual(grid.bpm, 60, delta=1)
+
+    def test_first_beat_is_kept(self):
+        for bpm, start in ((65, 0.5), (120, 0.3)):
+            with self.subTest(bpm=bpm, start=start):
+                samples, truth, downbeats = click_track(bpm, 4, 40, start=start)
+                store, grid = grid_of(samples)
+                self.assertAlmostEqual(grid.times[0], start, delta=0.03)
+                self.assertEqual(len(grid.times), len(truth))
+                estimate = beats.meter(store, grid)
+                self.assertEqual(estimate.downbeat_phase, 0)
+                self.assertAlmostEqual(estimate.downbeats[0], downbeats[0], delta=0.03)
+
+    def test_a_tempo_change_reads_as_unstable(self):
+        steady = np.concatenate([click_track(100, 4, 30)[0], click_track(100, 4, 30)[0]])
+        change = np.concatenate([click_track(100, 4, 30)[0], click_track(140, 4, 30)[0]])
+        self.assertGreater(grid_of(steady)[1].stability, 0.95)
+        self.assertLess(grid_of(change)[1].stability, 0.8)
 
     def test_noise_has_no_beat_grid(self):
         noise = np.random.default_rng(11).standard_normal(30 * RATE) * 0.1

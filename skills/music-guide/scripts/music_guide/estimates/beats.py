@@ -12,16 +12,25 @@ from .common import FULL_LIMIT, Method, Report, ReportContext, Skip
 from .store import FeatureStore
 
 TEMPO_RANGE = (60.0, 200.0)
+# A peak at a range edge interpolates up to about 1% past it, so the acceptance test allows this share beyond.
+TEMPO_EDGE = 0.02
 MIN_TEMPO_SECONDS = 8.0
 # Autocorrelation is summed per segment, so a 6 hour envelope never needs one whole-file FFT.
 ACF_SEGMENT = 2 ** 16
 # Ellis (2007) picks among octave-related tempi with a log-normal prior around 120 BPM.
 PRIOR_BPM, PRIOR_OCTAVES = 120.0, 1.0
+# The prior only chooses an octave: a candidate competes when it is within this share of half, once or twice the
+# strongest peak. A peak at 4/3 or 3/2 of the beat, from sixteenths or a three-against-two figure, never wins.
+OCTAVE_TOLERANCE = 0.06
 TIGHTNESS = 100.0
 # Normalized onset autocorrelation at the beat period: white noise and a slow pad read at most 0.04, the three
 # reference songs 0.51 to 0.63.
 MIN_PULSE = 0.1
 MIN_BEATS = 8
+# A tracked beat lands on an onset when its envelope peak reaches this share of the median beat's.
+ON_ONSET_SHARE = 0.25
+# Beat intervals within this share of the median count as steady.
+STEADY_SHARE = 0.1
 MIN_METER_BEATS = 24
 # A pitch-class row's window spans about 0.37 s each side of its centre, so the rows this far before and after a
 # beat show a chord change at that beat without smearing it onto the neighbouring beats.
@@ -80,7 +89,7 @@ def tempo(store: FeatureStore) -> TempoCandidates | Skip:
         curvature = before - 2 * here + after
         offset = 0.5 * (before - after) / curvature if curvature < 0 else 0.0
         bpm = 60 * frame_rate / (lag + offset)
-        if TEMPO_RANGE[0] <= bpm <= TEMPO_RANGE[1] and here > 0:
+        if TEMPO_RANGE[0] * (1 - TEMPO_EDGE) <= bpm <= TEMPO_RANGE[1] * (1 + TEMPO_EDGE) and here > 0:
             found.append((float(here), round(bpm, 1)))
     if not found:
         return Skip("the onset autocorrelation has no peak within 60-200 BPM.")
@@ -95,7 +104,8 @@ BEAT_METHOD = Method("ellis-dp-beats",
                      "beats tracked by dynamic programming (Ellis 2007) over a three-band spectral-flux onset envelope"
                      " toward one global tempo, chosen among the tempo candidates by a log-normal prior around 120 BPM."
                      " Half- and double-time grids fit the onsets equally well; tempo changes and rubato bend the grid"
-                     " only as far as the tightness penalty allows, and tempoStability shows how far it bent.")
+                     " only as far as the tightness penalty allows. tempoStability is low when the beat intervals vary"
+                     " or when beats miss the onsets, as they do through a tempo change the grid cannot follow.")
 METER_METHOD = Method("accent-pattern-meter",
                       "bars of 2, 3, 4 or 6 tracked beats scored by how much low-band onset strength and pitch-class"
                       " change concentrate on one beat position. 2/4 and 4/4, and 3/4 and 6/8, are often equally"
@@ -110,7 +120,10 @@ SWING_METHOD = Method("offbeat-onset-position",
 class BeatGrid:
     times: np.ndarray  # seconds, at least MIN_BEATS, finite and strictly increasing
     bpm: float  # 60 over the median beat interval
-    stability: float  # 1 minus the interquartile range of beat intervals over their median, 0..1
+    # 0..1, the lowest of three: 1 minus the interquartile range of beat intervals over their median, the share of
+    # intervals within STEADY_SHARE of the median, and the share of beats on an onset. A tempo change the grid
+    # cannot follow leaves its intervals even but its beats off the onsets.
+    stability: float
     method: Method = BEAT_METHOD
 
     def report(self, ctx: ReportContext) -> Report:
@@ -154,7 +167,10 @@ def _prior(bpm: float) -> float:
 
 
 def beat_grid(store: FeatureStore, tempo: TempoCandidates) -> BeatGrid | Skip:
-    bpm = max(tempo.candidates, key=lambda candidate: candidate[1] * _prior(candidate[0]))[0]
+    strongest = tempo.candidates[0][0]
+    octaves = [candidate for candidate in tempo.candidates
+               if any(abs(candidate[0] / (strongest * ratio) - 1) < OCTAVE_TOLERANCE for ratio in (0.5, 1, 2))]
+    bpm = max(octaves, key=lambda candidate: candidate[1] * _prior(candidate[0]))[0]
     period = 60 * store.onset_rate / bpm
     envelope = store.flux
     acf = autocorrelation(envelope - np.mean(envelope), int(2 * period) + 2)
@@ -166,15 +182,18 @@ def beat_grid(store: FeatureStore, tempo: TempoCandidates) -> BeatGrid | Skip:
     scaled = envelope / np.std(envelope)
     frames = _track(scaled, period)
     strength = np.array([scaled[max(0, frame - 1):frame + 2].max() for frame in frames])
-    strong = np.flatnonzero(strength >= 0.25 * np.median(strength))
-    frames = frames[strong[0]:strong[-1] + 1]
+    on_onset = strength >= ON_ONSET_SHARE * np.median(strength)
+    strong = np.flatnonzero(on_onset)
+    frames, on_onset = frames[strong[0]:strong[-1] + 1], on_onset[strong[0]:strong[-1] + 1]
     if len(frames) < MIN_BEATS:
         return Skip(f"only {len(frames)} beats were tracked; a beat grid needs {MIN_BEATS}.")
     times = (frames + _peak_offsets(scaled, frames)) / store.onset_rate
     intervals = np.diff(times)
     middle = float(np.median(intervals))
     spread = float(np.subtract(*np.percentile(intervals, [75, 25])))
-    return BeatGrid(times, 60 / middle, float(np.clip(1 - spread / middle, 0, 1)))
+    steady = float(np.mean(np.abs(intervals / middle - 1) <= STEADY_SHARE))
+    stability = min(1 - spread / middle, steady, float(np.mean(on_onset)))
+    return BeatGrid(times, 60 / middle, float(np.clip(stability, 0, 1)))
 
 
 def _peak_offsets(envelope: np.ndarray, frames: np.ndarray) -> np.ndarray:
@@ -189,7 +208,9 @@ def _peak_offsets(envelope: np.ndarray, frames: np.ndarray) -> np.ndarray:
 def _track(envelope: np.ndarray, period: float) -> np.ndarray:
     """Ellis (2007) beat frames: each frame adds the best predecessor 0.5 to 2 periods back, less a log-ratio penalty.
 
-    Frames are scored in blocks no longer than the shortest lag, so no frame in a block depends on another in it.
+    A frame whose best predecessor total is not positive starts a new path, so the first beat is not dropped for a
+    penalized lag back to the start of the file. Frames are scored in blocks no longer than the shortest lag, so no
+    frame in a block depends on another in it.
     """
     lags = np.arange(max(1, math.ceil(period / 2)), math.floor(2 * period) + 1)
     penalty = -TIGHTNESS * np.log(lags / period) ** 2
@@ -201,8 +222,10 @@ def _track(envelope: np.ndarray, period: float) -> np.ndarray:
         candidate = np.where(previous >= 0, score[np.maximum(previous, 0)] + penalty, -np.inf)
         best = np.argmax(candidate, axis=1)
         rows = np.arange(len(frames))
-        score[frames] += candidate[rows, best]
-        back[frames] = previous[rows, best]
+        gain = candidate[rows, best]
+        chained = gain > 0
+        score[frames] += np.where(chained, gain, 0.0)
+        back[frames] = np.where(chained, previous[rows, best], -1)
     tail = len(envelope) - int(round(period))
     beat = int(max(0, tail) + np.argmax(score[max(0, tail):]))
     path = []
