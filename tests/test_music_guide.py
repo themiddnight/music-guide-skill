@@ -508,8 +508,6 @@ class MusicGuideTest(unittest.TestCase):
             ("song.reason", b"x", "reason-song", "MIDI"),
             ("song.cpr", b"RIFF", "cubase-project", "Cubase 14"),
             ("song.npr", b"RIFF", "cubase-project", "DAWproject"),
-            ("song.als", gzip.compress(b"<Ableton/>"), "ableton-als", "Export Audio/Video"),
-            ("song.rpp", b"\xef\xbb\xbf<REAPER_PROJECT 0.1", "reaper-rpp", "MIDI"),
             ("song.flp", b"FLhd\x06\x00", "fl-studio-flp", "MIDI file"),
             ("song.song", zipped, "studio-one-song", "DAWproject"),
             ("song.ardour", b'<?xml version="1.0"?><Session/>', "ardour-session", "Session > Export"),

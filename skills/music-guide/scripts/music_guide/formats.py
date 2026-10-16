@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from .adapters import dawproject, midi, solna
+from .adapters import ableton, dawproject, midi, reaper, solna
 from .adapters.common import MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES
 from .model import Detail, Evidence
 
@@ -64,10 +64,11 @@ FORMATS: tuple[ProjectFormat, ...] = (
                   "Export the song to disk as WAV or AIFF. GarageBand cannot export MIDI; Logic Pro can open the project to do so."),
     ProjectFormat("cubase-project", "Cubase or Nuendo project", (".cpr", ".npr"), "file", MAX_ZIP_BYTES, _any, None,
                   "Export a DAWproject (Cubase 14 or later) or a MIDI file, plus a mixdown."),
-    ProjectFormat("ableton-als", "Ableton Live set", (".als",), "file", MAX_ZIP_BYTES, _signature(b"\x1f\x8b"), None,
+    ProjectFormat("ableton-als", "Ableton Live set", (".als",), "file", MAX_ZIP_BYTES, _signature(b"\x1f\x8b"),
+                  ableton.ableton,
                   "Export a mixdown and stems with File > Export Audio/Video, and MIDI clips as MIDI files."),
     ProjectFormat("reaper-rpp", "REAPER project", (".rpp",), "file", MAX_ZIP_BYTES,
-                  _signature(b"<REAPER_PROJECT", text=True), None,
+                  _signature(b"<REAPER_PROJECT", text=True), reaper.reaper,
                   "Render a mixdown and stems, and export MIDI items as MIDI files."),
     ProjectFormat("fl-studio-flp", "FL Studio project", (".flp",), "file", MAX_ZIP_BYTES, _signature(b"FLhd"), None,
                   "Export a WAV mixdown and stems, and use File > Export > MIDI file."),
