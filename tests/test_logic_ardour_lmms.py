@@ -131,14 +131,14 @@ class LogicPackageTest(ProjectCliCase):
             self.assertEqual(self.values(data, absent), [], absent)
         self.assertEqual(self.values(data, "logic.partial_key"), ["D"])
 
-    def test_tempo_conflicts_with_a_declaration_for_the_same_alternative(self):
+    def test_single_alternative_tempo_conflicts_with_a_project_declaration(self):
         package = self.make_package()
         declarations = self.dir / "declarations.json"
-        declarations.write_text(json.dumps([{"property": "tempo", "value": 120, "unit": "BPM", "scope": "alternative:000"}]))
+        declarations.write_text(json.dumps([{"property": "tempo", "value": 120, "unit": "BPM", "scope": "project"}]))
         data = self.evidence("--project", package, "--declarations", declarations)
         self.assertEqual([item["property"] for item in data["conflicts"]], ["tempo"])
-        self.assertEqual(data["conflicts"][0]["scope"], "alternative:000")
-        declarations.write_text(json.dumps([{"property": "tempo", "value": 92, "unit": "BPM", "scope": "alternative:000"}]))
+        self.assertEqual(data["conflicts"][0]["scope"], "project")
+        declarations.write_text(json.dumps([{"property": "tempo", "value": 92, "unit": "BPM", "scope": "project"}]))
         self.assertFalse(self.evidence("--project", package, "--declarations", declarations)["conflicts"])
 
     def test_garageband_package_shares_the_layout_and_explains_older_ones(self):
@@ -146,7 +146,7 @@ class LogicPackageTest(ProjectCliCase):
         data = self.project(package)
         self.assertEqual(data["sources"][0]["adapter"], "garageband-package")
         self.assertEqual(self.values(data, "project.application"), ["GarageBand 10.4.12 (5640)"])
-        self.assertEqual(self.values(data, "tempo", "alternative:000"), [92.0])
+        self.assertEqual(self.values(data, "tempo", "project"), [92.0])
         self.assertTrue(self.values(data, "garageband.alternative_name"))
         self.assertFalse(self.values(data, "logic.alternative_name"))
         legacy = self.dir / "old.band"

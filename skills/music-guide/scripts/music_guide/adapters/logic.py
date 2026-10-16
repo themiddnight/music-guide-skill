@@ -182,14 +182,13 @@ def _bundled_media(package: Path) -> dict[str, Any] | None:
 
 
 def _alternative(package: Path, number: str, names: dict[str, Any], flavor: Flavor, source_id: str,
-                 evidence: Evidence, detail: Detail) -> bool:
+                 evidence: Evidence, detail: Detail, scope: str) -> bool:
     meta = _read_plist(package, ("Alternatives", number, "MetaData.plist"))
     if meta is None:
         evidence.diagnostics.append(Diagnostic(
             "alternative_without_metadata", "warning",
             f"Alternatives/{number} has no MetaData.plist, so it was skipped.", source_id))
         return False
-    scope = f"alternative:{number}"
     where = f"Alternatives/{number}/MetaData.plist"
     facts = ProjectFacts(evidence, source_id, flavor.method, detail, scope)
 
@@ -248,7 +247,10 @@ def _package(path: Path, source_id: str, evidence: Evidence, detail: Detail, fla
         evidence.diagnostics.append(Diagnostic(
             "application_unknown", "info",
             "Resources/ProjectInformation.plist has no LastSavedFrom, so the application is not reported.", source_id))
-    parsed = [number for number in numbers if _alternative(path, number, names, flavor, source_id, evidence, detail)]
+    # A single alternative is the project, so its tempo can meet MIDI, audio and declarations in one scope.
+    scopes = {number: "project" if len(numbers) == 1 else f"alternative:{number}" for number in numbers}
+    parsed = [number for number in numbers
+              if _alternative(path, number, names, flavor, source_id, evidence, detail, scopes[number])]
     if not parsed:
         raise ValueError(f"{path.name} is not a {flavor.label} package with Alternatives/NNN/MetaData.plist. {flavor.guidance}")
     media = _bundled_media(path)
