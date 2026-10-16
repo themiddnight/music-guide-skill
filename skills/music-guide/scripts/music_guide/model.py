@@ -74,7 +74,7 @@ class Evidence:
 
     def as_json(self) -> dict[str, Any]:
         return {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": "1.1.0",
             "sources": [asdict(item) for item in self.sources],
             "observations": [asdict(item) for item in self.observations],
             "conflicts": [asdict(item) for item in self.conflicts],

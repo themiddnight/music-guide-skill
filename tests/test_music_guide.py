@@ -156,7 +156,7 @@ class MusicGuideTest(unittest.TestCase):
                                         capture_output=True).returncode, 0)
         data = self.run_cli(script=target / "scripts" / "analyze.py")
         self.assertEqual(data.returncode, 0, data.stderr)
-        self.assertEqual(json.loads(data.stdout)["schemaVersion"], "1.0.0")
+        self.assertEqual(json.loads(data.stdout)["schemaVersion"], "1.1.0")
         self.assertEqual(subprocess.run([sys.executable, str(ROOT / "install.py"), "--dest", str(target)],
                                         capture_output=True).returncode, 0)
         (target / "SKILL.md").write_text("changed")
