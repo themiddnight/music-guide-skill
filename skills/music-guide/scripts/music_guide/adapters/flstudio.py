@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import Note, summarize_notes
-from ..project import ProjectFacts, TrackKind, plausible_meter
+from ..project import MAX_TEMPO_BPM, ProjectFacts, TrackKind
 from .common import MAX_ZIP_BYTES, _read_bounded
 from .graded import GradedFacts
 
@@ -30,7 +30,7 @@ PLAYLIST_ITEM = struct.Struct("<IHHIHH2sH4sff")
 PLAYLIST_ITEM_SIZE_BEFORE_21, PLAYLIST_ITEM_SIZE_FROM_21 = 32, 60
 WRAPPER = "Fruity Wrapper"
 MAX_KEY = 131
-MIN_TEMPO, MAX_TEMPO = 10.0, 1000.0
+MIN_TEMPO, MAX_TEMPO = 10.0, MAX_TEMPO_BPM
 
 BYTE_END, WORD_END, DWORD_END = 64, 128, 192
 ID_TIME_SIG_NUMERATOR, ID_TIME_SIG_BEAT, ID_CHANNEL_TYPE = 17, 18, 21
@@ -351,7 +351,7 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
         numerator, beat = numbers[ID_TIME_SIG_NUMERATOR], numbers[ID_TIME_SIG_BEAT]
         add("flstudio.time_signature", {"numerator": numerator, "beat": beat}, "signature", "project",
             "events 17 and 18", METER_CAVEAT, confidence="low")
-        if numerator >= 1 and beat in METER_DENOMINATORS and plausible_meter(numerator, beat):
+        if beat in METER_DENOMINATORS:
             low.meter(numerator, beat, "events 17 and 18")
     for event_id, property in PROJECT_STRINGS.items():
         if strings.get(event_id):

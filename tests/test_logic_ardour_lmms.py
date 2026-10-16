@@ -475,7 +475,6 @@ class LmmsProjectTest(ProjectCliCase):
             "not-song.mmp": b"<lmms-project type=\"instrumenttracksettings\"/>",
             "no-type.mmp": b"<lmms-project/>",
             "bad-bpm.mmp": LMMS_XML.format(bpm="fast").encode(),
-            "zero-meter.mmp": good.replace('timesig_numerator="3"', 'timesig_numerator="0"').encode(),
             "negative-volume.mmp": good.replace('key="57" pos="0" len="48" vol="100"', 'key="57" pos="0" len="48" vol="-5"').encode(),
             "missing-note-attr.mmp": good.replace('<note key="62" pos="0" len="48" vol="100" pan="0"/>', '<note key="62" pos="0"/>').encode(),
             "nan.mmp": good.replace('key="62" pos="0"', 'key="62" pos="nan"').encode(),
@@ -680,13 +679,11 @@ class ArdourSessionTest(ProjectCliCase):
         incomplete = next(item for item in data["diagnostics"] if item["code"] == "locations_incomplete")
         self.assertIn("2 locations", incomplete["message"])
 
-    def test_implausible_rates_and_meters_are_errors(self):
+    def test_implausible_rates_are_errors(self):
         good = ardour_session(6000, ARDOUR6_TEMPO)
         cases = {
             "rate-low.ardour": good.replace('sample-rate="48000"', 'sample-rate="500"'),
             "rate-high.ardour": good.replace('sample-rate="48000"', 'sample-rate="2000000"'),
-            "bar-100.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="100"'),
-            "bar-0.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="0"'),
         }
         eight = ardour_session(8000, ARDOUR8_TEMPO)
         for rate in ("-282240000", "0", "1e999", "nan"):
@@ -694,6 +691,26 @@ class ArdourSessionTest(ProjectCliCase):
         for name, text in cases.items():
             with self.subTest(name=name):
                 self.failed(self.write(name, text))
+
+    def test_implausible_meters_are_skipped_with_a_warning_and_the_session_survives(self):
+        good = ardour_session(6000, ARDOUR6_TEMPO)
+
+        def with_meter(bar: str, note: str) -> dict:
+            text = good.replace('note-type="4.000000" divisions-per-bar="4.000000"',
+                                f'note-type="{note}" divisions-per-bar="{bar}"')
+            return self.project(self.write("meter.ardour", text))
+
+        for bar, note in (("0", "4"), ("2.5", "4"), ("1000", "4"), ("4", "129"), ("4", "0")):
+            with self.subTest(meter=(bar, note)):
+                data = with_meter(bar, note)
+                self.assertEqual(data["sources"][0]["status"], "ok", data["diagnostics"])
+                self.assertEqual(self.values(data, "meter"), [])
+                self.assertEqual(len(self.values(data, "project.tempo_map")), 1)
+                self.assertEqual(sum(item["code"] == "implausible_value" and "meter" in item["message"]
+                                     for item in data["diagnostics"]), 1)
+        for bar, note, expected in (("100", "4", "100/4"), ("7", "5", "7/5"), ("3", "128", "3/128")):
+            with self.subTest(meter=expected):
+                self.assertEqual(self.values(with_meter(bar, note), "meter"), [expected])
 
     def test_several_meters_without_readable_positions_are_reported(self):
         old = """<TempoMap>
@@ -712,7 +729,7 @@ class ArdourSessionTest(ProjectCliCase):
             "no-version.ardour": good.replace('version="6000" ', ""),
             "bad-tempo.ardour": good.replace('beats-per-minute="120.000000"', 'beats-per-minute="fast"'),
             "zero-tempo.ardour": good.replace('beats-per-minute="120.000000"', 'beats-per-minute="0"'),
-            "bad-meter.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="2.5"'),
+            "text-meter.ardour": good.replace('divisions-per-bar="4.000000"', 'divisions-per-bar="many"'),
             "bad-rate.ardour": good.replace('sample-rate="48000"', 'sample-rate="-1"'),
             "bad-position.ardour": ardour_session(6000, ARDOUR6_TEMPO, '<Location name="x" start="zz" end="1" flags="IsMark"/>'),
             "entities.ardour": good.replace("<Sources>", '<!DOCTYPE s [<!ENTITY x "y">]><Sources>', 1),

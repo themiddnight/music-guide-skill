@@ -481,7 +481,6 @@ class ReaperTest(DawBase):
             "second-project.rpp": RPP + "<REAPER_PROJECT 0.1\n>\n",
             "binary.rpp": RPP + "\x00\x01",
             "bad-tempo.rpp": RPP.replace("TEMPO 120 6 8", "TEMPO fast 6 8"),
-            "zero-meter.rpp": RPP.replace("TEMPO 120 6 8", "TEMPO 120 0 8"),
             "bad-delta.rpp": RPP.replace("E 480 80 3c 00", "E soon 80 3c 00"),
             "bad-point.rpp": RPP.replace("PT 4 90 1", "PT soon 90 1"),
             "no-length.rpp": RPP.replace("      LENGTH 4\n", ""),

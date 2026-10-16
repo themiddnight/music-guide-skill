@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..model import Detail, Diagnostic, Evidence
-from ..project import ProjectFacts, TrackKind, plausible_meter
+from ..project import ProjectFacts, TrackKind
 from .common import MAX_ZIP_BYTES, _read_bounded
 from .graded import GradedFacts
 
@@ -384,7 +384,7 @@ def _emit_metadata(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
     signature = by_id.get("MusicalSignature")
     if isinstance(signature, dict):
         numerator, denominator = signature.get("Numerator"), signature.get("Denominator")
-        if isinstance(numerator, int) and isinstance(denominator, int) and plausible_meter(numerator, denominator):
+        if numerator is not None and denominator is not None:
             low.meter(numerator, denominator, "Metadata MusicalSignature")
 
 

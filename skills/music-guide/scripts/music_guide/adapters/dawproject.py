@@ -392,7 +392,7 @@ def dawproject(path: Path, source_id: str, evidence: Evidence, detail: Detail) -
             facts.tempo(static_bpm, "Transport/Tempo/@value", "Stored transport tempo; automation is not reconstructed.")
         meter = _child(transport, "TimeSignature")
         if meter is not None and {"numerator", "denominator"} <= meter.attrib.keys():
-            facts.meter(_whole(meter, "numerator"), _whole(meter, "denominator"),
+            facts.meter(_number(meter, "numerator"), _number(meter, "denominator"),
                         "Transport/TimeSignature", "Stored transport meter; automation is not reconstructed.")
     structure = _child(root, "Structure")
     tracks = [] if structure is None else [item for item in structure.iter() if _local(item.tag) == "Track"]

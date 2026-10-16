@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import zipfile
 import subprocess
@@ -24,6 +25,39 @@ def smf(track: bytes, ticks: int = 480) -> bytes:
 
 
 END_OF_TRACK = b"\x00\xff\x2f\x00"
+
+
+FIXTURE_LMMS = """<?xml version="1.0"?>
+<!DOCTYPE lmms-project>
+<lmms-project version="1.0" type="song" creator="LMMS" creatorversion="1.2.2">
+  <head bpm="%d" timesig_numerator="%d" timesig_denominator="%d"/>
+  <song><trackcontainer type="song">
+    <track type="0" name="Lead" muted="0">
+      <instrumenttrack basenote="57" vol="100" pitch="0" pan="0"><instrument name="tripleoscillator"/></instrumenttrack>
+      <pattern pos="0" len="192" type="1" steps="16"><note key="57" len="48" pos="0" vol="100" pan="0"/></pattern>
+    </track>
+  </trackcontainer></song>
+</lmms-project>
+"""
+
+FIXTURE_REAPER = """<REAPER_PROJECT 0.1 "7.0/x64" 1
+ TEMPO %d %d %d
+ MARKER 1 5 "a" 0 0 1 R {X} 0
+>
+"""
+
+FIXTURE_MUSICXML = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>%d</beats><beat-type>%d</beat-type></time></attributes>
+<direction><sound tempo="%d"/></direction>
+<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note></measure></part></score-partwise>
+"""
+
+FIXTURE_DAWPROJECT = """<Project version="1.0"><Application name="Bitwig Studio" version="5.1"/>
+<Transport><Tempo unit="bpm" value="%d" id="t"/><TimeSignature numerator="%s" denominator="%d" id="ts"/></Transport>
+<Structure><Track contentType="audio" id="tr2" name="Vox"><Channel role="regular" id="c2"/></Track></Structure>
+<Arrangement id="a"/></Project>
+"""
 
 
 class CliCase(unittest.TestCase):
@@ -516,49 +550,137 @@ class PlausibleValueTest(CliCase):
     def values(self, data, prop):
         return [item["value"] for item in data["observations"] if item["property"] == prop]
 
-    def test_project_facts_reject_absurd_tempo_and_meter(self):
+    def warnings_for(self, data, prop):
+        return [item for item in data["diagnostics"]
+                if item["code"] == "implausible_value" and re.match(rf"Skipped (\d+ of \d+ )?{re.escape(prop)} ", item["message"])]
+
+    def test_project_facts_skip_implausible_values_with_one_warning_each(self):
         from music_guide.model import Evidence
         from music_guide.project import ProjectFacts
-        facts = ProjectFacts(Evidence(), "s1", "test", "summary")
+        evidence = Evidence()
+        facts = ProjectFacts(evidence, "s1", "test", "summary")
         facts.tempo(1000, "loc")
         facts.tempo(0.5, "loc")
-        for bpm in (1000.001, 999999, 1e300, 0, -1, float("nan")):
-            with self.subTest(bpm=bpm), self.assertRaises(ValueError):
-                facts.tempo(bpm, "loc")
-        with self.assertRaises(ValueError):
-            facts.tempo_map([{"beat": 0, "bpm": 120}, {"beat": 4, "bpm": 5000}], "loc")
-        for numerator, denominator in ((4, 4), (99, 64), (1, 1), (7, 8), (6, 16)):
+        for numerator, denominator in ((4, 4), (999, 128), (1, 1), (7, 8), (6, 16), (4, 3), (7, 5), (3.0, 8.0)):
             facts.meter(numerator, denominator, "loc")
-        for numerator, denominator in ((100, 4), (0, 4), (4, 0), (4, 3), (4, 128), (4, 6), (10 ** 300, 4), (4, True)):
-            with self.subTest(meter=(numerator, denominator)), self.assertRaises(ValueError):
-                facts.meter(numerator, denominator, "loc")
+        accepted = len(evidence.observations)
+        self.assertEqual(accepted, 10)
+        self.assertEqual(evidence.diagnostics, [])
+        bad_tempos = (1000.001, 999999, 1e300, 10 ** 400, 0, -1, float("nan"), float("inf"), True, "120", None)
+        bad_meters = ((1000, 4), (0, 4), (4, 0), (4, 129), (-4, 4), (10 ** 300, 4), (1e300, 4), (2.5, 4), (4, 2.5), (4, True),
+                      (None, 4), ("4", 4), (float("nan"), 4))
+        for bpm in bad_tempos:
+            with self.subTest(bpm=bpm):
+                before = len(evidence.diagnostics)
+                facts.tempo(bpm, "tempo-locator")
+                self.assertEqual(len(evidence.diagnostics), before + 1)
+        for numerator, denominator in bad_meters:
+            with self.subTest(meter=(numerator, denominator)):
+                before = len(evidence.diagnostics)
+                facts.meter(numerator, denominator, "meter-locator")
+                self.assertEqual(len(evidence.diagnostics), before + 1)
+        self.assertEqual(len(evidence.observations), accepted)
+        for item in evidence.diagnostics:
+            self.assertEqual((item.code, item.severity, item.sourceId), ("implausible_value", "warning", "s1"))
+            self.assertLess(len(item.message), 200)
+        self.assertIn("tempo", evidence.diagnostics[0].message)
+        self.assertIn("tempo-locator", evidence.diagnostics[0].message)
+        self.assertIn("1000.001", evidence.diagnostics[0].message)
+        self.assertIn("meter", evidence.diagnostics[len(bad_tempos)].message)
+        self.assertIn("meter-locator", evidence.diagnostics[len(bad_tempos)].message)
 
-    def test_plausibility_predicates_accept_the_same_values(self):
+    def test_tempo_map_drops_only_implausible_points_and_warns_once(self):
+        from music_guide.model import Evidence
+        from music_guide.project import ProjectFacts
+        evidence = Evidence()
+        facts = ProjectFacts(evidence, "s1", "test", "summary")
+        facts.tempo_map([{"beat": 0, "bpm": 120}, {"beat": 4, "bpm": 5000}, {"beat": 8, "bpm": 90},
+                         {"beat": 12, "bpm": -3}, {"beat": float("nan"), "bpm": 100}], "map")
+        self.assertEqual([item.value for item in evidence.observations],
+                         [[{"beat": 0.0, "bpm": 120.0}, {"beat": 8.0, "bpm": 90.0}]])
+        warnings = [item for item in evidence.diagnostics if item.code == "implausible_value"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("3 of 5", warnings[0].message)
+        self.assertIn("project.tempo_map", warnings[0].message)
+        facts.tempo_map([{"beat": 0, "bpm": 5000}], "all-bad")
+        self.assertEqual(len(evidence.observations), 1)
+        self.assertEqual(sum(item.code == "implausible_value" for item in evidence.diagnostics), 2)
+
+    def test_plausibility_predicates_use_the_exported_limits(self):
+        from music_guide import project
         from music_guide.project import plausible_meter, plausible_tempo
-        self.assertTrue(plausible_tempo(120) and plausible_tempo(1000.0))
-        self.assertFalse(any(plausible_tempo(value) for value in (0, -3, 1001, float("inf"), float("nan"), True, "120")))
-        self.assertTrue(plausible_meter(3, 4) and plausible_meter(3.0, 8.0))
-        self.assertFalse(any(plausible_meter(*pair) for pair in ((0, 4), (100, 4), (3, 5), (3, 128), (2.5, 4), (True, 4), (3, None))))
+        self.assertEqual((project.MAX_TEMPO_BPM, project.MAX_METER_NUMERATOR, project.MAX_METER_DENOMINATOR),
+                         (1000.0, 999, 128))
+        self.assertTrue(plausible_tempo(120) and plausible_tempo(1000.0) and plausible_tempo(10 ** 3))
+        self.assertFalse(any(plausible_tempo(value) for value in (0, -3, 1001, 10 ** 400, float("inf"), float("nan"), True, "120")))
+        self.assertTrue(all(plausible_meter(*pair) for pair in ((3, 4), (3.0, 8.0), (4, 3), (7, 5), (999, 128), (1, 1))))
+        self.assertFalse(any(plausible_meter(*pair) for pair in (
+            (0, 4), (1000, 4), (3, 129), (3, 0), (-3, 4), (2.5, 4), (True, 4), (3, None), (10 ** 300, 4), (1e300, 4))))
 
-    def test_dawproject_with_absurd_transport_is_a_source_error(self):
-        def project(transport: str) -> Path:
-            path = self.dir / "t.dawproject"
-            with zipfile.ZipFile(path, "w") as archive:
-                archive.writestr("project.xml", f'<Project version="1"><Transport>{transport}</Transport></Project>')
-            return path
-        self.assertIn("BPM limit", self.optional_error(project('<Tempo value="5000" unit="bpm"/>'), "--dawproject"))
-        self.assertIn("meter", self.optional_error(project('<TimeSignature numerator="200" denominator="4"/>'), "--dawproject"))
-        data = self.evidence("--dawproject", project('<Tempo value="1000" unit="bpm"/>'))
-        self.assertEqual(self.values(data, "tempo"), [1000.0])
+    def test_unusual_but_real_values_keep_every_project_in_every_format(self):
+        lmms = (self.dir / "a.mmp")
+        lmms.write_text((FIXTURE_LMMS % (140, 3, 3)))
+        reaper = self.write("a.rpp", FIXTURE_REAPER % (120, 7, 5))
+        cases = {
+            "lmms 3/3": (lmms, "3/3", "project.track"),
+            "reaper 7/5": (reaper, "7/5", "project.marker"),
+            "musicxml 4/3": (self.write("a.musicxml", FIXTURE_MUSICXML % (4, 3, 120)), "4/3", "project.track_notes"),
+            "musicxml 100/4": (self.write("b.musicxml", FIXTURE_MUSICXML % (100, 4, 120)), "100/4", "project.track_notes"),
+            "dawproject 7/5": (self.dawproject(7, 5, 120), "7/5", "project.track"),
+        }
+        for name, (path, meter, kept) in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--dawproject" if path.suffix == ".dawproject" else "--project", path)
+                self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
+                self.assertEqual(self.values(data, "meter"), [meter])
+                self.assertTrue(self.values(data, kept))
+                self.assertEqual([item for item in data["diagnostics"] if item["code"] == "implausible_value"], [])
 
-    def test_reaper_with_absurd_tempo_is_a_source_error(self):
-        path = self.write("a.rpp", '<REAPER_PROJECT 0.1 "6.0/macOS" 1\n  TEMPO 999999 4 4\n>\n')
-        self.assertIn("BPM limit", self.optional_error(path))
+    def test_implausible_tempo_or_meter_is_skipped_and_the_rest_of_the_project_survives(self):
+        cases = {
+            "lmms tempo": (self.write("t.mmp", FIXTURE_LMMS % (5000, 3, 4)), "tempo", "project.track"),
+            "lmms meter": (self.write("m.mmp", FIXTURE_LMMS % (140, 1000, 4)), "meter", "project.track"),
+            "reaper tempo": (self.write("t.rpp", FIXTURE_REAPER % (5000, 4, 4)), "tempo", "project.marker"),
+            "reaper meter": (self.write("m.rpp", FIXTURE_REAPER % (120, 4, 200)), "meter", "project.marker"),
+            "musicxml tempo": (self.write("t.musicxml", FIXTURE_MUSICXML % (4, 4, 1200)), "tempo", "project.track_notes"),
+            "musicxml meter": (self.write("m.musicxml", FIXTURE_MUSICXML % (1000, 4, 120)), "meter", "project.track_notes"),
+            "musicxml beat type": (self.write("b.musicxml", FIXTURE_MUSICXML % (4, 129, 120)), "meter", "project.track_notes"),
+            "dawproject tempo": (self.dawproject(4, 4, 5000), "tempo", "project.track"),
+            "dawproject meter": (self.dawproject(4, 129, 120), "meter", "project.track"),
+            "dawproject zero numerator": (self.dawproject(0, 4, 120), "meter", "project.track"),
+            "dawproject fractional": (self.dawproject(2.5, 4, 120), "meter", "project.track"),
+            "lmms fractional": (self.write("f.mmp", FIXTURE_LMMS.replace('timesig_numerator="%d"', 'timesig_numerator="2.5"')
+                                           % (140, 4)), "meter", "project.track"),
+        }
+        for name, (path, prop, kept) in cases.items():
+            with self.subTest(name=name):
+                data = self.evidence("--dawproject" if path.suffix == ".dawproject" else "--project", path)
+                self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
+                self.assertEqual(self.values(data, prop), [])
+                self.assertTrue(self.values(data, kept))
+                self.assertEqual(len(self.warnings_for(data, prop)), 1, data["diagnostics"])
+
+    def test_implausible_tempo_points_are_dropped_from_the_tempo_map_not_the_project(self):
+        score = FIXTURE_MUSICXML % (4, 4, 120)
+        note = "<note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration></note>"
+        score = score.replace("</measure>", f'</measure><measure number="2"><direction><sound tempo="1200"/></direction>{note}</measure>'
+                              f'<measure number="3"><direction><sound tempo="90"/></direction>{note}</measure>')
+        data = self.evidence("--project", self.write("map.musicxml", score))
+        self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
+        self.assertEqual([[point["bpm"] for point in value] for value in self.values(data, "project.tempo_map")], [[120.0, 90.0]])
+        self.assertEqual(len(self.warnings_for(data, "project.tempo_map")), 1)
+
+    def dawproject(self, numerator, denominator, tempo) -> Path:
+        path = self.dir / f"t{numerator}-{denominator}-{tempo}.dawproject"
+        numerator = f"{numerator:g}"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("project.xml", FIXTURE_DAWPROJECT % (tempo, numerator, denominator))
+        return path
 
     def test_flp_with_implausible_meter_keeps_the_rest_of_the_project(self):
         def event(event_id: int, payload: bytes) -> bytes:
             return bytes([event_id]) + payload
-        events = [bytes([199, 12]) + b"20.8.3.2304\0", event(156, struct.pack("<I", 128000)), event(17, bytes([200])),
+        events = [bytes([199, 12]) + b"20.8.3.2304\0", event(156, struct.pack("<I", 128000)), event(17, bytes([0])),
                   event(18, bytes([4]))]
         body = b"".join(events)
         path = self.write("a.flp", b"FLhd" + struct.pack("<IhHH", 6, 0, 2, 96) + b"FLdt" + struct.pack("<I", len(body)) + body)
@@ -566,13 +688,14 @@ class PlausibleValueTest(CliCase):
         self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
         self.assertEqual(self.values(data, "tempo"), [128.0])
         self.assertEqual(self.values(data, "meter"), [])
-        self.assertEqual(self.values(data, "flstudio.time_signature"), [{"numerator": 200, "beat": 4}])
+        self.assertEqual(self.values(data, "flstudio.time_signature"), [{"numerator": 0, "beat": 4}])
+        self.assertEqual(len(self.warnings_for(data, "meter")), 1, data["diagnostics"])
 
     def test_studio_one_skips_implausible_tempo_and_meter_segments(self):
         song = ('<?xml version="1.0" encoding="UTF-8"?><Song xmlns:x="urn:presonus"><Attributes x:id="Root">'
                 '<Attributes x:id="timeContext" sampleRate="44100">'
                 '<TempoMap x:id="tempoMap"><TempoMapSegment curveType="0" start="0" tempo="0.0001"/></TempoMap>'
-                '<TimeSignatureMap x:id="timeSignatureMap"><TimeSignatureMapSegment start="0" numerator="3" denominator="5"/>'
+                '<TimeSignatureMap x:id="timeSignatureMap"><TimeSignatureMapSegment start="0" numerator="3" denominator="256"/>'
                 '</TimeSignatureMap></Attributes></Attributes></Song>')
         path = self.dir / "a.song"
         with zipfile.ZipFile(path, "w") as archive:

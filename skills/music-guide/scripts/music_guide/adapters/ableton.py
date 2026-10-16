@@ -143,7 +143,10 @@ class _Transport:
         found = []
         for entry in self.master.findall("TimeSignatures/RemoteableTimeSignature"):
             numerator, denominator = _child_number(entry, "Numerator"), _child_number(entry, "Denominator")
-            if numerator is None or denominator is None or not plausible_meter(numerator, denominator):
+            if numerator is None or denominator is None:
+                continue
+            if not plausible_meter(numerator, denominator):
+                self.facts.skip_meter(numerator, denominator, f"{self.locator}/TimeSignatures")
                 continue
             found.append((max(_child_number(entry, "Time") or 0.0, 0.0), (int(numerator), int(denominator))))
         return sorted(found)

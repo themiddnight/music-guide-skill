@@ -15,7 +15,7 @@ from typing import Any
 from xml.etree.ElementTree import Element
 
 from ..model import Detail, Diagnostic, Evidence
-from ..project import TIME_DOMAINS, PositionUnit, ProjectFacts, TrackKind
+from ..project import TIME_DOMAINS, PositionUnit, ProjectFacts, TrackKind, plausible_meter
 from .common import _finite_number, _parse_xml, _read_bounded
 
 MAX_ARDOUR_BYTES = 32 * 1024 * 1024
@@ -26,8 +26,6 @@ SAMPLE_POSITION = re.compile(r"-?[0-9]{1,18}")
 TIMED_POSITION = re.compile(r"([ab])(-?[0-9]{1,18})")
 SAMPLE_RATES = (1_000, 1_000_000)
 SUPERCLOCK_RATES = (1_000, 10**12)
-MAX_BEATS_PER_BAR = 99
-MAX_NOTE_VALUE = 128
 TRUE_TEXT = frozenset({"1", "yes", "true"})
 
 
@@ -85,7 +83,7 @@ def _tempo_points(tempo_map: Element) -> list[tuple[float | None, float]]:
     return points
 
 
-def _meter_points(tempo_map: Element) -> list[tuple[float | None, int, int]]:
+def _meter_points(tempo_map: Element) -> list[tuple[float | None, float, float]]:
     nested = tempo_map.find("Meters")
     nodes = nested.findall("Meter") if nested is not None else tempo_map.findall("Meter")
     points = []
@@ -94,8 +92,7 @@ def _meter_points(tempo_map: Element) -> list[tuple[float | None, int, int]]:
         denominator = "note-value" if "note-value" in node.attrib else "note-type"
         # Ardour 4 and older name the numerator beats-per-bar.
         numerator = "divisions-per-bar" if "divisions-per-bar" in node.attrib else "beats-per-bar"
-        points.append((_beat(node, label), _whole_number(node, numerator, label, MAX_BEATS_PER_BAR),
-                       _whole_number(node, denominator, label, MAX_NOTE_VALUE)))
+        points.append((_beat(node, label), _number(node, numerator, label), _number(node, denominator, label)))
     return points
 
 
@@ -214,9 +211,14 @@ def ardour(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
                 "TempoMap has several meters without a readable position (an Ardour 4 or older session), so no meter is claimed.",
                 source_id))
         elif meters:
-            extra("ardour.meter_map", [{"beat": beat, "meter": f"{num}/{den}"} for beat, num, den in sorted(meters)],
-                  "meter_map", "TempoMap/Meter", "Stored meter changes in beat order; no single static meter is claimed.",
-                  time_domain="project_beats")
+            for _, num, den in meters:
+                if not plausible_meter(num, den):
+                    facts.skip_meter(num, den, "TempoMap/Meter")
+            listed = [{"beat": beat, "meter": f"{int(num)}/{int(den)}"} for beat, num, den in sorted(meters)
+                      if plausible_meter(num, den)]
+            if listed:
+                extra("ardour.meter_map", listed, "meter_map", "TempoMap/Meter",
+                      "Stored meter changes in beat order; no single static meter is claimed.", time_domain="project_beats")
     _locations(session, source_id, evidence, facts, sample_rate, superclock)
     routes = session.findall("Routes/Route")
     if len(routes) > MAX_ROUTES:

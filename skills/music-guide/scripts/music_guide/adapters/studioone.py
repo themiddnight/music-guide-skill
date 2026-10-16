@@ -15,7 +15,8 @@ from pathlib import Path
 from xml.etree.ElementTree import Element
 
 from ..model import Detail, Diagnostic, Evidence
-from ..project import ProjectFacts, TrackKind, plausible_meter, plausible_tempo
+from ..project import (MAX_METER_DENOMINATOR, MAX_METER_NUMERATOR, ProjectFacts, TrackKind, plausible_meter,
+                       plausible_tempo)
 from .common import MAX_XML_BYTES, MAX_ZIP_BYTES, _finite_number, _local, _parse_xml, _read_zip_member
 from .graded import GradedFacts
 
@@ -30,8 +31,6 @@ EVENT_TAG = re.compile(r"Event$|^MusicPart$|^AudioPart$|^Part$")
 STRUCTURE_TRACKS = frozenset({"MarkerTrack", "ArrangerTrack"})
 MEDIA_KINDS: dict[str, TrackKind] = {"Audio": "audio", "Music": "instrument"}
 FOLDER_TRACKS = frozenset({"FolderTrack"})
-MAX_NUMERATOR = 128
-DENOMINATORS = frozenset({1, 2, 4, 8, 16, 32, 64, 128})
 ABSENT_START = "The start attribute is absent in the file, so position 0 is assumed."
 SAMPLE_RATE_LOCATOR = "Song/song.xml timeContext/@sampleRate"
 UNDECLARED_PREFIX = re.compile(rb'<(/?)([^\s/>!?][^\s/>]*)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|\'[^\']*\'))*)\s*(/?)>')
@@ -302,11 +301,10 @@ def _emit_meters(facts: ProjectFacts, evidence: Evidence, source_id: str, contex
         try:
             numerator, denominator = _number(segment, "numerator"), _number(segment, "denominator")
             start = _number(segment, "start", 0.0)
-            if (numerator is None or denominator is None or not numerator.is_integer() or not denominator.is_integer()
-                    or not 1 <= numerator <= MAX_NUMERATOR or int(denominator) not in DENOMINATORS
-                    or not plausible_meter(int(numerator), int(denominator))):
+            if not plausible_meter(numerator, denominator):
                 raise ValueError(f"signature {segment.attrib.get('numerator')!r}/{segment.attrib.get('denominator')!r} "
-                                 f"needs a whole numerator of 1-{MAX_NUMERATOR} and a power-of-two denominator")
+                                 f"needs a whole numerator of 1-{MAX_METER_NUMERATOR} and a whole denominator of "
+                                 f"1-{MAX_METER_DENOMINATOR}")
         except ValueError as error:
             _dropped(evidence, source_id, "time signature", index, str(error))
             dropped = True

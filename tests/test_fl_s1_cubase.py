@@ -502,7 +502,7 @@ class StudioOneTest(ProjectCliTest):
             self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0.0, "bpm": 120.0}]], bad)
             self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "tempo" in item["message"]
                                 for item in data["diagnostics"]), bad)
-        for numerator, denominator in (("1e300", "4"), ("3", "3"), ("0", "4"), ("3", "0"), ("2.5", "4"), ("3", "256")):
+        for numerator, denominator in (("1e300", "4"), ("1000", "4"), ("0", "4"), ("3", "0"), ("2.5", "4"), ("3", "256")):
             meters = ONE_METER + (f'<TimeSignatureMapSegment start="32" numerator="{numerator}" denominator="{denominator}"/>')
             data = self.project(self.write("m.song", song=song_xml(meters=meters)))
             self.assertEqual(self.values(data, "meter"), [], (numerator, denominator))

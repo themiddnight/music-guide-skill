@@ -238,7 +238,7 @@ def lmms(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
                 evidence.diagnostics.append(Diagnostic("tempo_model_is_element", "warning",
                     "The LMMS tempo is stored as an element, so it may be automated; the static tempo is the value at save time.", source_id))
         if "timesig_numerator" in head.attrib and "timesig_denominator" in head.attrib:
-            facts.meter(_whole(head, "timesig_numerator", "head", 1), _whole(head, "timesig_denominator", "head", 1),
+            facts.meter(_attribute(head, "timesig_numerator", "head"), _attribute(head, "timesig_denominator", "head"),
                         "head/@timesig_numerator,@timesig_denominator")
     song = root.find("song")
     if song is None:

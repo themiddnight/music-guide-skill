@@ -9,7 +9,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence, get_args
 
 from .adapters.common import _finite_number, _media_basename
 from .adapters.listing import MAX_LISTED, MAX_NOTE_LISTING, limit_reached
-from .model import Confidence, Detail, Evidence
+from .model import Confidence, Detail, Diagnostic, Evidence
 from .notes import Note, summarize_notes
 
 TrackKind = Literal["audio", "midi", "instrument", "group", "return", "master", "folder", "unknown"]
@@ -28,8 +28,9 @@ def _list_limit(property: str) -> int:
 
 
 MAX_TEMPO_BPM = 1000.0
-MAX_METER_NUMERATOR = 99
-MAX_METER_DENOMINATOR = 64
+MAX_METER_NUMERATOR = 999
+MAX_METER_DENOMINATOR = 128
+SHOWN_CHARS = 40
 
 
 def _whole_value(value: object) -> int | None:
@@ -41,28 +42,35 @@ def _whole_value(value: object) -> int | None:
 
 
 def plausible_tempo(bpm: object) -> bool:
-    """True for a finite tempo in (0, 1000] BPM. Adapters use it to skip an optional value they cannot trust."""
-    return (isinstance(bpm, (int, float)) and not isinstance(bpm, bool) and math.isfinite(bpm)
-            and 0 < bpm <= MAX_TEMPO_BPM)
+    """True for a tempo above 0 and up to 1000 BPM. NaN and infinity fail the comparison."""
+    return isinstance(bpm, (int, float)) and not isinstance(bpm, bool) and 0 < bpm <= MAX_TEMPO_BPM
 
 
 def plausible_meter(numerator: object, denominator: object) -> bool:
-    """True for a numerator in 1..99 over a power-of-two denominator up to 64."""
+    """True for a whole numerator in 1..999 over a whole denominator in 1..128. Odd ones such as 4/3 are real music."""
     top, bottom = _whole_value(numerator), _whole_value(denominator)
     return (top is not None and bottom is not None and 1 <= top <= MAX_METER_NUMERATOR
-            and 1 <= bottom <= MAX_METER_DENOMINATOR and bottom & (bottom - 1) == 0)
+            and 1 <= bottom <= MAX_METER_DENOMINATOR)
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _shown(value: object) -> str:
+    text = repr(value)
+    return text if len(text) <= SHOWN_CHARS else f"{text[:SHOWN_CHARS]}..."
 
 
 def _count(value: int, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{label} must be a nonnegative integer")
-    return value
-
-
-def _tempo_value(bpm: float, label: str) -> float:
-    value = _finite_number(bpm, label, positive=True)
-    if value > MAX_TEMPO_BPM:
-        raise ValueError(f"{label} {value:g} is above the {MAX_TEMPO_BPM:g} BPM limit")
     return value
 
 
@@ -97,26 +105,47 @@ class ProjectFacts:
     def application(self, name: str, locator: str) -> None:
         self._add("project.application", name, "text", locator, "Application name stored in the project file.")
 
+    def _implausible(self, what: str, locator: str, limit: str) -> None:
+        self.evidence.diagnostics.append(Diagnostic(
+            "implausible_value", "warning",
+            f"Skipped {what} at {locator}: it is outside {limit}, so the rest of the project is still reported.",
+            self.source_id))
+
+    def skip_meter(self, numerator: object, denominator: object, locator: str) -> None:
+        """Warn that a meter was skipped as implausible. Adapters that collect meters themselves call it for each one."""
+        self._implausible(f"meter {_shown(numerator)}/{_shown(denominator)}", locator,
+                          f"1-{MAX_METER_NUMERATOR} over 1-{MAX_METER_DENOMINATOR}")
+
     def tempo(self, bpm: float, locator: str,
               reason: str = "Stored project tempo; tempo automation is not reconstructed.") -> None:
-        self._add("tempo", _tempo_value(bpm, "tempo"), "BPM", locator, reason, confidence="medium")
+        """An implausible tempo is skipped with a warning, never raised, so one odd value keeps the project."""
+        if not plausible_tempo(bpm):
+            return self._implausible(f"tempo {_shown(bpm)}", locator, f"0 to {MAX_TEMPO_BPM:g} BPM")
+        self._add("tempo", float(bpm), "BPM", locator, reason, confidence="medium")
 
-    def meter(self, numerator: int, denominator: int, locator: str,
+    def meter(self, numerator: float, denominator: float, locator: str,
               reason: str = "Stored project meter; meter changes are not reconstructed.",
               confidence: Confidence = "medium") -> None:
-        _count(numerator, "meter numerator"), _count(denominator, "meter denominator")
+        """An implausible meter is skipped with a warning, never raised. Odd ones such as 7/5 are accepted."""
         if not plausible_meter(numerator, denominator):
-            raise ValueError(f"meter {numerator}/{denominator} is outside 1-{MAX_METER_NUMERATOR} over a power of two "
-                             f"up to {MAX_METER_DENOMINATOR}")
-        self._add("meter", f"{numerator}/{denominator}", "signature", locator, reason, confidence=confidence)
+            return self.skip_meter(numerator, denominator, locator)
+        self._add("meter", f"{_whole_value(numerator)}/{_whole_value(denominator)}", "signature", locator, reason,
+                  confidence=confidence)
 
     def tempo_map(self, points: Sequence[Mapping[str, float]], locator: str) -> None:
-        """Each point is {"beat": position in quarter notes, "bpm": tempo from that beat}."""
-        value = [{"beat": _finite_number(point["beat"], "tempo map beat"),
-                  "bpm": _tempo_value(point["bpm"], "tempo map bpm")} for point in points]
-        self._add("project.tempo_map", value, "BPM", locator,
-                  "Stored tempo changes in beat order; interpolation between points is not modeled.",
-                  time_domain="project_beats")
+        """Each point is {"beat": position in quarter notes, "bpm": tempo from that beat}.
+
+        Points with an implausible tempo or position are dropped and counted in one warning.
+        """
+        value = [{"beat": beat, "bpm": float(point["bpm"])} for point in points
+                 if (beat := _finite(point["beat"])) is not None and plausible_tempo(point["bpm"])]
+        if len(value) < len(points):
+            self._implausible(f"{len(points) - len(value)} of {len(points)} project.tempo_map points", locator,
+                              f"a finite beat and 0 to {MAX_TEMPO_BPM:g} BPM")
+        if value:
+            self._add("project.tempo_map", value, "BPM", locator,
+                      "Stored tempo changes in beat order; interpolation between points is not modeled.",
+                      time_domain="project_beats")
 
     def sample_rate(self, hz: int, locator: str) -> None:
         rate = _finite_number(hz, "sample rate", positive=True)
