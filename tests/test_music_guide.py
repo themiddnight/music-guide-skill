@@ -1,5 +1,3 @@
-"""Behavior tests over synthetic, local source files and an installed skill copy."""
-
 from __future__ import annotations
 
 import json
@@ -37,6 +35,7 @@ class MusicGuideTest(unittest.TestCase):
     def evidence(self, *args):
         result = self.run_cli(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
         data = json.loads(result.stdout)
         jsonschema.validate(data, SCHEMA)
         source_ids = {item["id"] for item in data["sources"]}
@@ -130,7 +129,7 @@ class MusicGuideTest(unittest.TestCase):
     def test_dawproject_transport_only_and_xml_safety(self):
         project = self.dir / "song.dawproject"
         with zipfile.ZipFile(project, "w") as archive:
-            archive.writestr("project.xml", '<Project version="1"><Transport><Tempo value="120"/><TimeSignature numerator="4" denominator="4"/></Transport><Structure><Track name="Drums"/><Track name="Bass"/></Structure><Arrangement><Tempo value="180"/></Arrangement></Project>')
+            archive.writestr("project.xml", '<Project version="1"><Transport><Tempo value="120" unit="bpm"/><TimeSignature numerator="4" denominator="4"/></Transport><Structure><Track name="Drums"/><Track name="Bass"/></Structure><Arrangement><Tempo value="180"/></Arrangement></Project>')
         data = self.evidence("--dawproject", project)
         tempos = [item for item in data["observations"] if item["property"] == "tempo"]
         self.assertEqual([item["value"] for item in tempos], [120])
@@ -177,6 +176,89 @@ class MusicGuideTest(unittest.TestCase):
         for word in ("theory", "composition", "arrangement", "production", "mixing", "mastering", "mood", "genre", "artwork"):
             self.assertIn(word, skill)
             self.assertIn(word, domains)
+
+    def test_unreadable_optional_payloads_preserve_mixdown(self):
+        project = self.dir / "unsupported-compression.dawproject"
+        with zipfile.ZipFile(project, "w") as archive:
+            archive.writestr("project.xml", '<Project version="1.0"/>')
+        raw = bytearray(project.read_bytes())
+        raw[8:10] = (99).to_bytes(2, "little")
+        central = raw.index(b"PK\x01\x02")
+        raw[central + 10:central + 12] = (99).to_bytes(2, "little")
+        project.write_bytes(raw)
+        corrupt = self.dir / "corrupt-deflate.dawproject"
+        with zipfile.ZipFile(corrupt, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("project.xml", '<Project version="1.0"/>')
+        raw = bytearray(corrupt.read_bytes())
+        offset = 30 + int.from_bytes(raw[26:28], "little") + int.from_bytes(raw[28:30], "little")
+        raw[offset] = 0xff
+        corrupt.write_bytes(raw)
+        for flag, path in [("--dawproject", project), ("--dawproject", corrupt),
+                           ("--solna", self.dir / "large-number.solna"),
+                           ("--solna", self.dir / "deep.solna"),
+                           ("--declarations", self.dir / "deep-declarations.json")]:
+            if path.name == "large-number.solna":
+                path.write_text('{"formatVersion":12,"content":{"bpm":' + "9" * 400 + ',"meterId":"4/4","loops":[]}}')
+            elif path.name.startswith("deep"):
+                path.write_text("[" * 1500 + "0" + "]" * 1500)
+            with self.subTest(path=path.name):
+                data = self.evidence(flag, path)
+                self.assertEqual(data["sources"][1]["status"], "error")
+                self.assertEqual(len(data["observations"]), 6)
+
+    def test_dawproject_missing_structure_and_tempo_units(self):
+        project = self.dir / "partial.dawproject"
+        for xml, expected in [
+            ('<Project version="1.0"/>', "missing"),
+            ('<Project version="1.0"><Structure/></Project>', "empty"),
+            ('<Project version="1.0"><Transport><Tempo value="0.5" unit="seconds"/></Transport></Project>', "bad_unit"),
+            ('<Project version="1.0"><Transport><Tempo value="120"/></Transport></Project>', "missing_unit"),
+        ]:
+            with zipfile.ZipFile(project, "w") as archive:
+                archive.writestr("project.xml", xml)
+            with self.subTest(expected=expected):
+                data = self.evidence("--dawproject", project)
+                counts = [item for item in data["observations"] if item["property"] == "dawproject.track_count"]
+                if expected == "missing":
+                    self.assertEqual(counts, [])
+                elif expected == "empty":
+                    self.assertEqual([item["value"] for item in counts], [0])
+                else:
+                    self.assertFalse(any(item["property"] == "tempo" for item in data["observations"]))
+                    self.assertEqual(data["sources"][1]["status"], "error")
+
+
+    def test_audio_precision_and_diagnostics(self):
+        for subtype in ("PCM_U8", "PCM_16", "PCM_24", "PCM_32", "FLOAT", "DOUBLE"):
+            with self.subTest(subtype=subtype):
+                sf.write(self.mix, np.full((32, 2), 0.5), 48000, subtype=subtype)
+                data = self.evidence()
+                facts = {item["property"]: item["value"] for item in data["observations"]}
+                self.assertEqual(facts["audio.channels"], 2)
+                self.assertAlmostEqual(facts["audio.rms"], -6.020599913, places=7)
+        sf.write(self.mix, np.array([-1.0, 1.0]), 48000, subtype="FLOAT")
+        data = self.evidence()
+        self.assertEqual(next(item["value"] for item in data["observations"]
+                              if item["property"] == "audio.samples_at_or_above_full_scale"), 2)
+        self.assertTrue(any(item["code"] == "possible_clipping" for item in data["diagnostics"]))
+        for values in (np.array([float("nan")]), np.array([1e-300])):
+            sf.write(self.mix, values, 48000, subtype="DOUBLE")
+            result = self.run_cli()
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+
+    def test_installer_dry_run_and_symlink_collision(self):
+        target = self.dir / "not-created" / "music-guide"
+        result = subprocess.run([sys.executable, str(ROOT / "install.py"), "--dest", str(target), "--dry-run"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(target.parent.exists())
+        target.parent.mkdir()
+        target.symlink_to(SKILL, target_is_directory=True)
+        result = subprocess.run([sys.executable, str(ROOT / "install.py"), "--dest", str(target)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(target.is_symlink())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,3 @@
-"""Small, explicit evidence records shared by the local adapters."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -86,11 +84,9 @@ class Evidence:
 
 
 def detect_conflicts(evidence: Evidence) -> None:
-    """Compare static claims in the same property, scope, unit and time domain."""
     shared_properties = {"tempo", "meter"}
     groups: dict[tuple[str, str, str, str], list[Observation]] = {}
     for item in evidence.observations:
-        # File inventories and event streams describe distinct sources, not shared claims.
         if item.timeDomain != "static" or item.property not in shared_properties:
             continue
         key = (item.property, item.scope, item.unit, item.timeDomain)

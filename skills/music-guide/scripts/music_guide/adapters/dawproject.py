@@ -1,8 +1,7 @@
-"""Read only bounded DAWproject transport and structure metadata."""
-
 from __future__ import annotations
 
 import zipfile
+import zlib
 from pathlib import Path
 
 from defusedxml import ElementTree as ET
@@ -27,8 +26,13 @@ def dawproject(path: Path, source_id: str, evidence: Evidence) -> None:
         files = [item for item in entries if item.filename == "project.xml"]
         if len(files) != 1 or files[0].file_size > MAX_XML_BYTES:
             raise ValueError("DAWproject must contain one bounded project.xml")
-        with archive.open(files[0]) as stream:
-            raw = stream.read(MAX_XML_BYTES + 1)
+        if files[0].compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise ValueError("DAWproject metadata compression must be stored or deflated")
+        try:
+            with archive.open(files[0]) as stream:
+                raw = stream.read(MAX_XML_BYTES + 1)
+        except (RuntimeError, zlib.error) as error:
+            raise ValueError(f"Cannot read DAWproject metadata: {error}") from error
         if len(raw) > MAX_XML_BYTES:
             raise ValueError("DAWproject project.xml exceeds size limit")
     root = ET.fromstring(raw, forbid_dtd=True, forbid_entities=True, forbid_external=True)
@@ -42,6 +46,8 @@ def dawproject(path: Path, source_id: str, evidence: Evidence) -> None:
     if transport is not None:
         tempo = _child(transport, "Tempo")
         if tempo is not None and "value" in tempo.attrib:
+            if tempo.attrib.get("unit") != "bpm":
+                raise ValueError("DAWproject Transport/Tempo unit must be bpm")
             value = _finite_number(float(tempo.attrib["value"]), "Tempo value", positive=True)
             evidence.add(source_id, "tempo", value, "BPM", "project", "static",
                          "Transport/Tempo/@value", "dawproject-xml", "extracted", "medium",
@@ -56,7 +62,9 @@ def dawproject(path: Path, source_id: str, evidence: Evidence) -> None:
                          "static", "Transport/TimeSignature", "dawproject-xml", "extracted", "medium",
                          "Stored transport meter; automation is not reconstructed.")
     structure = _child(root, "Structure")
-    tracks = [item for item in structure.iter() if _local(item.tag) == "Track"] if structure is not None else []
+    if structure is None:
+        return
+    tracks = [item for item in structure.iter() if _local(item.tag) == "Track"]
     evidence.add(source_id, "dawproject.track_count", len(tracks), "count", "project", "static",
                  "Structure/Track", "dawproject-xml", "extracted", "high", "Count of stored Track elements.")
     for index, track in enumerate(tracks):

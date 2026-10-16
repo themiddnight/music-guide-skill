@@ -41,6 +41,21 @@ python3 /path/to/skills/music-guide/scripts/analyze.py --mixdown song.wav
 
 The installer copies only `skills/music-guide`. Repeating it with identical content is safe; different existing content is refused without deletion. It does not alter host configuration or install Python dependencies. A copied skill runs without this repository.
 
+For Codex's legacy user skill directory, the destination is `~/.codex/skills/music-guide`, or `<CODEX_HOME>/skills/music-guide` when configured. Claude Code's user skill directory is `~/.claude/skills/music-guide`. Restart the host after installation. Keep dependencies in a virtual environment and use that environment's Python when running the CLI. On Windows, its interpreter is `.venv\Scripts\python.exe`; Windows has not been tested here.
+
+## Use the conversational skill
+
+Ask Codex to use `music-guide`, or invoke `/music-guide:music-guide` in Claude Code after plugin installation. For example:
+
+- "Analyze this mixdown and explain which findings come from audio versus my MIDI."
+- "Explain why a D minor progression can feel unresolved. I do not have a recording."
+- "Critique this arrangement against my goal of a quieter first verse. Mark anything that needs listening."
+- "Recommend three mixing experiments from this mixdown, with a way to check each one."
+- "Compare these two mixdowns and account for their level difference."
+- "Create a contrasting bridge and three artwork directions. Treat them as proposals."
+
+The CLI extracts evidence. The host model supplies the musical explanation and proposals. If the host cannot hear audio, the skill states that limit and avoids claims about audible instruments, mood, or genre.
+
 The [format contract](skills/music-guide/references/formats.md) lists accepted inputs and parser limits. Bounds are defined in `skills/music-guide/scripts/music_guide/adapters/common.py` and role preflight limits in `skills/music-guide/scripts/music_guide/cli.py`.
 
 ## Supported metadata and limits
@@ -48,6 +63,8 @@ The [format contract](skills/music-guide/references/formats.md) lists accepted i
 MIDI SMF 0/1 records stored tempo and meter events, track names, paired notes, ticks and beats. Type 2 and SMPTE timing are explicitly unsupported. SOLNA extraction is limited to inspected version 12 and earlier with the same validated shape: project BPM/meter ID, loop scales, and chord fields. It does not decode patterns or emulate rendering. DAWproject reads bounded `project.xml` metadata for version, transport settings, and track count/names; it does not reconstruct nested event timing or media. Proprietary Logic, Cubase, FL Studio, and Ableton sessions need WAV and optional standard exports.
 
 Current validation uses generated fixtures on macOS. Real source projects, other operating systems, and host discovery beyond local CLI checks need separate verification. Future work includes real-world fixtures with permission, broader codecs, dedicated LUFS/true-peak measurement, uncertain key/tempo estimation, and deeper DAWproject event timing.
+
+See the [input contract and adapter extension guide](skills/music-guide/references/formats.md) for parser limits and how to add support. Packaging follows the [OpenAI plugin packaging guide](https://developers.openai.com/plugins/build/plugins), with a portable root manifest and Codex compatibility metadata. The [DAWproject specification](https://github.com/bitwig/dawproject) defines the source container and XML fields.
 
 ## Development checks
 

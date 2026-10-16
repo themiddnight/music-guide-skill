@@ -1,1 +1,0 @@
-"""Supported local source adapters."""

@@ -1,5 +1,3 @@
-"""Shared parser limits and scalar validation."""
-
 from __future__ import annotations
 import math
 from pathlib import Path
@@ -25,7 +23,10 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 def _finite_number(value: object, label: str, positive: bool = False) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{label} exceeds finite numeric range") from error
     if not math.isfinite(number) or (positive and number <= 0):
         raise ValueError(f"{label} must be a finite positive number" if positive else f"{label} must be finite")
     return number

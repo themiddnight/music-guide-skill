@@ -1,5 +1,3 @@
-"""Read-only audio adapter."""
-
 from __future__ import annotations
 import math
 from pathlib import Path
@@ -35,6 +33,8 @@ def audio(path: Path, source_id: str, evidence: Evidence, scope: str = "mixdown"
             sample_count += block.size
             threshold_count += int(np.count_nonzero(absolute >= 1.0))
         rms = math.sqrt(sum_squares / sample_count)
+        if peak > 0 and rms == 0:
+            raise ValueError("audio energy is below finite measurement range")
         facts = [
             ("audio.duration", file.frames / file.samplerate, "seconds"),
             ("audio.channels", file.channels, "count"),

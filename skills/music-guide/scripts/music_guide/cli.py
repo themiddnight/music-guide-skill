@@ -1,5 +1,3 @@
-"""Command-line orchestration and strict JSON evidence output."""
-
 from __future__ import annotations
 
 import argparse
@@ -15,7 +13,7 @@ import soundfile as sf
 from defusedxml.common import DefusedXmlException
 
 from .adapters import audio, dawproject, midi, solna
-from .adapters.common import MAX_JSON_BYTES, _read_bounded
+from .adapters.common import MAX_AUDIO_BYTES, MAX_JSON_BYTES, MAX_MIDI_BYTES, MAX_ZIP_BYTES, _read_bounded
 from .model import Diagnostic, Evidence, Source, detect_conflicts
 
 ADAPTERS = {
@@ -25,9 +23,9 @@ ADAPTERS = {
     "solna": solna.solna,
     "dawproject": dawproject.dawproject,
 }
-LIMITS = {"mixdown": 4 * 1024**3, "stem": 4 * 1024**3,
-          "midi": 32 * 1024**2, "solna": 8 * 1024**2,
-          "dawproject": 64 * 1024**2}
+LIMITS = {"mixdown": MAX_AUDIO_BYTES, "stem": MAX_AUDIO_BYTES,
+          "midi": MAX_MIDI_BYTES, "solna": MAX_JSON_BYTES,
+          "dawproject": MAX_ZIP_BYTES}
 
 
 def _hash(path: Path) -> str:
@@ -86,7 +84,7 @@ def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path |
                     raise ValueError("source does not exist")
                 if not (path.is_file() or path.is_dir()):
                     raise ValueError("source is not a regular file or package directory")
-                if path.is_file() and path.stat().st_size <= 64 * 1024**2:
+                if path.is_file() and path.stat().st_size <= MAX_ZIP_BYTES:
                     source.sha256 = _hash(path)
                 source.status = "unsupported"
                 evidence.diagnostics.append(Diagnostic("unsupported_project", "warning",
@@ -104,7 +102,8 @@ def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path |
                 ADAPTERS[role](path, source_id, staged)
             _merge(evidence, staged)
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, EOFError,
-                sf.LibsndfileError, zipfile.BadZipFile, ET.ParseError, DefusedXmlException) as error:
+                sf.LibsndfileError, zipfile.BadZipFile, ET.ParseError, DefusedXmlException,
+                RecursionError) as error:
             source.status = "error"
             if role == "mixdown":
                 raise ValueError(f"required mixdown {path.name}: {error}") from error
@@ -113,7 +112,7 @@ def build(mixdown: Path, optionals: list[tuple[str, Path]], declarations: Path |
     if declarations:
         try:
             _load_declarations(declarations, evidence)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, RecursionError) as error:
             source_id = f"s{len(evidence.sources) + 1}"
             evidence.sources.append(Source(source_id, declarations.name, "declarations", "json-declarations", "error", None))
             evidence.diagnostics.append(Diagnostic("optional_source_error", "warning",
