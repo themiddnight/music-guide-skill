@@ -501,7 +501,8 @@ class MusicGuideTest(unittest.TestCase):
         zipped = zip_bytes.read_bytes()
         inventory = [
             ("song.ptx", b"\x03\x00anything", "pro-tools-session", "AAF"),
-            ("song.PTF", b"x", "pro-tools-session", "AAF"),
+            ("song.PTF", b"\x00" + b"0010111100101011", "pro-tools-session", "AAF"),
+            ("song.pts", b"x", "pro-tools-session", "AAF"),
             ("song.bwproject", b"BtWg", "bitwig-project", "File > Export > DAWproject"),
             ("song.reason", b"x", "reason-song", "MIDI"),
             ("song.cpr", b"RIFF", "cubase-project", "Cubase 14"),

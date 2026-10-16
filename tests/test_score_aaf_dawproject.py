@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -415,6 +416,15 @@ class AafTest(ScoreCase):
         data = self.evidence("--project", self.make(), "--declarations", declarations)
         self.assertEqual(data["conflicts"], [])
 
+    def test_installed_copy_runs_the_isolated_parser(self):
+        installed = self.dir / "installed" / "music-guide"
+        shutil.copytree(SKILL, installed, ignore=shutil.ignore_patterns("__pycache__"))
+        result = subprocess.run([sys.executable, str(installed / "scripts" / "analyze.py"), "--project",
+                                 str(self.make())], cwd=self.dir, text=True, capture_output=True,
+                                env={**os.environ, "PYTHONWARNINGS": "error"})
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["status"], "ok")
+
     def test_unsupported_and_corrupt_files_are_source_errors(self):
         good = self.make().read_bytes()
         bomb = bytearray(good)
@@ -593,6 +603,29 @@ class DawProjectTest(ScoreCase):
                 data = self.evidence("--project", project(arrangement), mixdown=True)
                 self.assertEqual(data["sources"][1]["status"], "error")
                 self.assertEqual([item for item in data["observations"] if item["sourceIds"] == ["s2"]], [])
+
+
+class SignatureTest(ScoreCase):
+    def test_pro_tools_signature_follows_ptformat(self):
+        for name, content in (("a.ptx", b"\x03\x00rest"), ("b.ptf", b"\x00" + b"0010111100101011" + bytes(8)),
+                              ("c.PTX", b"\x03")):
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.write(name, content))
+                self.assertEqual((data["sources"][0]["adapter"], data["sources"][0]["status"]),
+                                 ("pro-tools-session", "unsupported"))
+        for name, content in (("d.ptx", b"RIFF----"), ("e.ptf", b"0010111100101011"), ("f.ptx", b""),
+                              ("g.ptf", bytes(1) + bytes(0x100) + b"0010111100101011")):
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.write(name, content), mixdown=True)
+                self.assert_rejected(data, "does not match the Pro Tools session", "s2")
+        data = self.evidence("--project", self.write("template.pts", b"anything"))
+        self.assertEqual(data["sources"][0]["status"], "unsupported")
+
+    def test_bitwig_and_reason_have_no_confirmed_signature_and_stay_inventory_only(self):
+        for name, adapter in (("a.bwproject", "bitwig-project"), ("a.reason", "reason-song")):
+            with self.subTest(name=name):
+                data = self.evidence("--project", self.write(name, b"whatever bytes"))
+                self.assertEqual((data["sources"][0]["adapter"], data["sources"][0]["status"]), (adapter, "unsupported"))
 
 
 if __name__ == "__main__":
