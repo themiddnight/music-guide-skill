@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
-from ..analysis import MAX_FEATURE_CHANNELS, MusicFeatures, SpectrumMeter, StereoMeter
+from ..analysis import KEY_SWITCH_PENALTY, MAX_FEATURE_CHANNELS, MusicFeatures, SpectrumMeter, StereoMeter
 from ..loudness import MIN_LOUDNESS_RATE, LoudnessMeter, TruePeakMeter
 from ..model import Confidence, Diagnostic, Evidence, Provenance
 from .common import MAX_AUDIO_BYTES
@@ -243,20 +243,21 @@ def _estimate_facts(features: MusicFeatures, note: str) -> list[Fact]:
     key = features.key()
     if key is not None:
         facts.append(Fact("audio.key_estimate", key, "key", "krumhansl-kessler-chroma",
-                          "Estimate, not a fact: correlation of the whole-file chroma with Krumhansl-Kessler major and"
-                          " minor profiles. Modal, non-diatonic or pentatonic music (for example Hirajoshi), key changes"
+                          "Estimate, not a fact: mean correlation of each 5 s chroma cell with Krumhansl-Kessler"
+                          " major and minor profiles, so a long passage outweighs a loud one. Modal, non-diatonic or pentatonic music (for example Hirajoshi), key changes"
                           " and detuning can be mislabelled; read audio.pitch_class_profile directly, and"
                           " audio.key_timeline for key changes." + note,
                           "low", "inferred"))
     timeline = features.key_timeline()
     if timeline is not None:
         facts.append(Fact("audio.key_timeline", timeline, "key", "krumhansl-kessler-chroma-windows",
-                          "Estimate, not a fact: each 5 s cell is labelled by the Krumhansl-Kessler key of a centered"
-                          " 25 s chroma window, runs shorter than 15 s are merged into a neighbour, and each segment's"
-                          " candidates come from its own summed chroma. A new segment suggests a modulation or a"
-                          " tonicized section; boundaries are accurate to about one window, and changes shorter than"
-                          " 15 s are not shown. The same modal and pentatonic caveats as audio.key_estimate apply."
-                          + note, "low", "inferred"))
+                          "Estimate, not a fact: a Viterbi path over 5 s chroma cells scored against Krumhansl-Kessler"
+                          f" profiles, where changing key costs {KEY_SWITCH_PENALTY:g} in summed correlation. A new"
+                          " segment needs sustained evidence: a distant key shows within about 20 s, a closely related"
+                          " key (for example the dominant) can need over a minute, and borrowed chords or short"
+                          " tonicizations stay in the surrounding key. Boundaries are accurate to about one cell. The"
+                          " penalty was calibrated on three listener-labelled songs only. The same modal and"
+                          " pentatonic caveats as audio.key_estimate apply." + note, "low", "inferred"))
     return facts
 
 

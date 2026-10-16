@@ -223,32 +223,47 @@ class AudioMetricsTest(unittest.TestCase):
         self.assertGreater(sum(profile[name] for name in ("E", "F", "A", "B", "C")), 0.75)
         self.assertTrue(all(profile[name] < 0.05 for name in ("C#", "D", "D#", "F#", "G", "G#", "A#")))
 
-    def progression(self, roots: tuple[int, ...], seconds: float) -> np.ndarray:
-        chords = [note(root, 2) + note(root + 4, 2) + note(root + 7, 2) for root in roots]
-        return np.concatenate([chords[index % len(chords)] for index in range(int(seconds // 2))])
+    def progression(self, chords: tuple[tuple[int, int], ...], seconds: float) -> np.ndarray:
+        """Two-second triads cycled for `seconds`; each chord is (root, third) in semitones."""
+        sounds = [note(root, 2) + note(root + third, 2) + note(root + 7, 2) for root, third in chords]
+        return np.concatenate([sounds[index % len(sounds)] for index in range(int(seconds // 2))])
 
-    def test_key_timeline_shows_a_modulation_between_sections(self):
-        mono = np.concatenate([self.progression((60, 65, 67), 30), self.progression((67, 60, 62), 30)])
+    C_MAJOR = ((60, 4), (65, 4), (67, 4))
+    E_MAJOR = ((64, 4), (69, 4), (71, 4))
+    G_MAJOR = ((67, 4), (60, 4), (62, 4))
+    D_MINOR = ((62, 3), (67, 3), (69, 4))
+
+    def tops(self, data: dict) -> list[tuple]:
+        return [(item["candidates"][0]["tonic"], item["candidates"][0]["mode"], item["startSeconds"],
+                 item["endSeconds"]) for item in self.value(data, "audio.key_timeline")["segments"]]
+
+    def test_key_timeline_shows_a_modulation_between_distant_keys(self):
+        mono = np.concatenate([self.progression(self.E_MAJOR, 30), self.progression(self.G_MAJOR, 30)])
         data = self.analyze(stereo(mono))
         fact = data["facts"]["audio.key_timeline"]
         self.assertEqual((fact["provenance"], fact["confidence"]), ("inferred", "low"))
-        segments = fact["value"]["segments"]
-        tops = [(item["candidates"][0]["tonic"], item["candidates"][0]["mode"]) for item in segments]
-        self.assertEqual(tops, [("C", "major"), ("G", "major")])
-        self.assertEqual(segments[0]["startSeconds"], 0)
-        self.assertEqual(segments[-1]["endSeconds"], 60)
-        self.assertEqual(segments[0]["endSeconds"], segments[1]["startSeconds"])
-        self.assertLessEqual(abs(segments[1]["startSeconds"] - 30), fact["value"]["windowSeconds"])
+        self.assertEqual(self.tops(data), [("E", "major", 0, 30), ("G", "major", 30, 60)])
+
+    def test_key_timeline_ignores_a_short_parallel_major_passage_and_a_single_chord(self):
+        minor = self.progression(self.D_MINOR, 40)
+        passages = {"15 s of D major": self.progression(((62, 4), (67, 4), (69, 4)), 15),
+                    "one D major chord": self.progression(((62, 4),), 2)}
+        for label, passage in passages.items():
+            with self.subTest(label):
+                data = self.analyze(stereo(np.concatenate([minor, passage, minor])))
+                self.assertEqual([top[:2] for top in self.tops(data)], [("D", "minor")])
+                candidate = self.value(data, "audio.key_estimate")["candidates"][0]
+                self.assertEqual((candidate["tonic"], candidate["mode"]), ("D", "minor"))
 
     def test_key_timeline_is_one_segment_without_modulation(self):
-        data = self.analyze(stereo(self.progression((60, 65, 67), 48)))
+        data = self.analyze(stereo(self.progression(self.C_MAJOR, 48)))
         segments = self.value(data, "audio.key_timeline")["segments"]
         self.assertEqual(len(segments), 1)
         self.assertEqual((segments[0]["startSeconds"], segments[0]["endSeconds"]), (0, 48))
         self.assertEqual(segments[0]["candidates"][0]["tonic"], "C")
 
     def test_key_timeline_needs_enough_audio(self):
-        data = self.analyze(stereo(self.progression((60, 65, 67), 12)))
+        data = self.analyze(stereo(self.progression(self.C_MAJOR, 12)))
         self.assertIn("audio.key_estimate", data["facts"])
         self.assertNotIn("audio.key_timeline", data["facts"])
 

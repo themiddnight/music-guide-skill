@@ -19,12 +19,14 @@ MAX_FEATURE_CHANNELS = 8
 TEMPO_RANGE = (60.0, 200.0)
 MIN_TEMPO_SECONDS = 8.0
 MIN_KEY_SECONDS = 2.0
-# The key timeline sums chroma into 5 s cells, labels each cell by a centered 25 s window and
-# merges runs shorter than 15 s, so a passing chord cannot read as a modulation.
+# Keys are scored per 5 s chroma cell. A key change costs KEY_SWITCH_PENALTY in summed
+# correlation, so a new key must outscore the old one over about 25 to 50 s, not for one chord.
+# Penalties from 1.0 to 3.0 all matched the three listener-labelled reference songs.
 KEY_CELL_SECONDS = 5.0
-KEY_WINDOW_CELLS = 5
-MIN_KEY_SEGMENT_CELLS = 3
+KEY_SWITCH_PENALTY = 2.0
 MIN_KEY_TIMELINE_SECONDS = 30.0
+KEYS = tuple((tonic, mode, np.roll(profile, index)) for mode, profile in (("major", KK_MAJOR), ("minor", KK_MINOR))
+             for index, tonic in enumerate(PITCH_CLASSES))
 
 
 class Framer:
@@ -228,7 +230,11 @@ class MusicFeatures:
     def key(self) -> dict | None:
         if self.pitch_class_profile() is None:
             return None
-        return estimate_key(self.chroma)
+        scored = key_scores(self.chroma_cells)
+        if scored is None:
+            return None
+        scores, usable = scored
+        return _candidates(np.mean(scores[usable], axis=0))
 
     def key_timeline(self) -> dict | None:
         if self.seconds < MIN_KEY_TIMELINE_SECONDS or self.pitch_class_profile() is None:
@@ -266,59 +272,51 @@ def estimate_tempo(envelope: np.ndarray, frame_rate: float) -> dict | None:
     return {"candidates": top, "octaveRelatedCandidates": octave}
 
 
+def key_scores(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Correlation of each cell's chroma with the 24 Krumhansl-Kessler profiles, and which cells have pitch spread.
+
+    Cells without spread (silence) score 0 for every key, so they never favour a change.
+    """
+    usable = np.std(cells, axis=1) > 0
+    if not np.any(usable):
+        return None
+    centered = cells[usable] - cells[usable].mean(axis=1, keepdims=True)
+    profiles = np.array([profile - profile.mean() for _, _, profile in KEYS])
+    scores = np.zeros((len(cells), len(KEYS)))
+    scores[usable] = (centered @ profiles.T) / np.outer(np.linalg.norm(centered, axis=1),
+                                                        np.linalg.norm(profiles, axis=1))
+    return scores, usable
+
+
 def estimate_key_timeline(cells: np.ndarray, seconds: float) -> dict | None:
-    half = KEY_WINDOW_CELLS // 2
-    labels = []
-    for index in range(len(cells)):
-        key = estimate_key(np.sum(cells[max(0, index - half):index + half + 1], axis=0))
-        labels.append(None if key is None else _top_key(key))
-    runs: list[list] = []
-    for index, label in enumerate(labels):
-        if runs and label in (None, runs[-1][2]):
+    """Viterbi path over cells: stay in a key for free, switch for KEY_SWITCH_PENALTY."""
+    scored = key_scores(cells)
+    if scored is None:
+        return None
+    scores, usable = scored
+    total, back = scores[0].copy(), []
+    for row in scores[1:]:
+        switch = total.max() - KEY_SWITCH_PENALTY
+        back.append(np.where(total >= switch, np.arange(len(KEYS)), int(total.argmax())))
+        total = np.maximum(total, switch) + row
+    path = [int(total.argmax())]
+    for pointers in reversed(back):
+        path.append(int(pointers[path[-1]]))
+    path.reverse()
+    runs: list[list[int]] = []
+    for index, key in enumerate(path):
+        if runs and runs[-1][2] == key:
             runs[-1][1] = index + 1
-        elif label is None:
-            runs.append([index, index + 1, None])
         else:
-            runs.append([index, index + 1, label])
-    while True:
-        short = [i for i, run in enumerate(runs) if run[1] - run[0] < MIN_KEY_SEGMENT_CELLS]
-        if len(runs) < 2 or not short:
-            break
-        index = min(short, key=lambda i: runs[i][1] - runs[i][0])
-        neighbor = index - 1 if index > 0 else index + 1
-        first, second = sorted((index, neighbor))
-        runs[first:second + 1] = [[runs[first][0], runs[second][1], runs[neighbor][2]]]
-    segments: list[dict] = []
-    for start, end, _ in runs:
-        key = estimate_key(np.sum(cells[start:end], axis=0))
-        if key is None:
-            continue
-        if segments and _top_key(segments[-1]["key"]) == _top_key(key):
-            segments[-1]["end"] = end
-            segments[-1]["key"] = estimate_key(np.sum(cells[segments[-1]["start"]:end], axis=0))
-        else:
-            segments.append({"start": start, "end": end, "key": key})
-    if not segments:
-        return None
-    return {"windowSeconds": KEY_WINDOW_CELLS * KEY_CELL_SECONDS,
-            "segments": [{"startSeconds": round(0.0 if i == 0 else item["start"] * KEY_CELL_SECONDS, 1),
-                          "endSeconds": round(seconds if i == len(segments) - 1
-                                              else item["end"] * KEY_CELL_SECONDS, 1),
-                          "candidates": item["key"]["candidates"]} for i, item in enumerate(segments)]}
+            runs.append([index, index + 1, key])
+    return {"cellSeconds": KEY_CELL_SECONDS,
+            "segments": [{"startSeconds": round(start * KEY_CELL_SECONDS, 1),
+                          "endSeconds": round(seconds if index == len(runs) - 1 else end * KEY_CELL_SECONDS, 1),
+                          **_candidates(np.mean(scores[start:end][usable[start:end]], axis=0))}
+                         for index, (start, end, _) in enumerate(runs)]}
 
 
-def _top_key(key: dict) -> tuple[str, str]:
-    return key["candidates"][0]["tonic"], key["candidates"][0]["mode"]
-
-
-def estimate_key(chroma: np.ndarray) -> dict | None:
-    if not np.std(chroma) > 0:
-        return None
-    scores = []
-    for tonic in range(12):
-        for mode, profile in (("major", KK_MAJOR), ("minor", KK_MINOR)):
-            correlation = float(np.corrcoef(chroma, np.roll(profile, tonic))[0, 1])
-            scores.append((correlation, PITCH_CLASSES[tonic], mode))
-    scores.sort(reverse=True)
-    return {"candidates": [{"tonic": tonic, "mode": mode, "correlation": round(score, 3)}
-                           for score, tonic, mode in scores[:3]]}
+def _candidates(scores: np.ndarray) -> dict:
+    order = np.argsort(-scores, kind="stable")[:3]
+    return {"candidates": [{"tonic": KEYS[i][0], "mode": KEYS[i][1], "correlation": round(float(scores[i]), 3)}
+                           for i in order]}
