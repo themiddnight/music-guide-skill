@@ -149,9 +149,14 @@ class AbletonTest(DawBase):
         self.assertEqual([(item["value"]["name"], item["value"]["position"], item["value"]["unit"])
                           for item in self.facts(data, "project.marker")], [("Chorus", 16.0, "beats"), (None, 0.0, "beats")])
         self.assertEqual([(item["scope"], item["value"]["name"]) for item in self.facts(data, "project.plugin")],
-                         [("project_track:0", "Serum"), ("project_track:0", "Compressor2"),
-                          ("project_track:0", "AUDelay"), ("project_track:1", "Valhalla Room"),
-                          ("project_track:3", "Reverb")])
+                         [("project_track:0", "Serum"), ("project_track:0", "AUDelay"),
+                          ("project_track:1", "Valhalla Room")])
+        devices = self.facts(data, "ableton.device")
+        self.assertEqual([(item["scope"], item["value"]) for item in devices],
+                         [("project_track:0", {"name": "Compressor2", "track": 0, "builtin": True}),
+                          ("project_track:3", {"name": "Reverb", "track": 3, "builtin": True})])
+        for item in devices:
+            self.assertIn("Built-in Ableton device element name", item["confidenceReason"])
         self.assertEqual([item["value"] for item in self.facts(data, "project.media_reference")],
                          [{"basename": "vox take.wav", "count": 2}])
         self.assertEqual(self.one(data, "project.clip_count")["value"], 3)
@@ -193,6 +198,15 @@ class AbletonTest(DawBase):
         notes = self.facts(data, "project.note")
         self.assertEqual([(item["value"]["startBeat"], item["value"]["endBeat"]) for item in notes], [(16.0, 17.0)])
         self.assertEqual(self.one(data, "project.track_notes", "project_track:0")["value"]["noteCount"], 1)
+
+    def test_clamped_velocities_are_counted_in_a_diagnostic(self):
+        clip = midi_clip(1, {60: [(0.0, 1.0, 200), (1.0, 1.0, -4), (2.0, 1.0, 100)]}, start=0.0, end=4.0)
+        data = self.evidence("--project", self.write(live_set(midi_track("Pad", clip))), "--detail", "full")
+        self.assertEqual(sorted(item["value"]["velocity"] for item in self.facts(data, "project.note")), [0, 100, 127])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "ableton_velocity_clamped")
+        self.assertIn("2 note", warning["message"])
+        clean = self.evidence("--project", self.write(LIVE_11, "clean.als"))
+        self.assertFalse(any(item["code"] == "ableton_velocity_clamped" for item in clean["diagnostics"]))
 
     def test_clip_without_loop_fields_is_skipped_not_guessed(self):
         clip = midi_clip(1, {60: [(0.0, 1.0, 100)]}, start=0.0, end=4.0, loop=None)
@@ -461,8 +475,7 @@ class ReaperTest(DawBase):
             "binary.rpp": RPP + "\x00\x01",
             "bad-tempo.rpp": RPP.replace("TEMPO 120 6 8", "TEMPO fast 6 8"),
             "zero-meter.rpp": RPP.replace("TEMPO 120 6 8", "TEMPO 120 0 8"),
-            "bad-event.rpp": RPP.replace("E 480 80 3c 00", "E 480 80 zz 00"),
-            "short-event.rpp": RPP.replace("E 480 80 3c 00", "E 480 80"),
+            "bad-delta.rpp": RPP.replace("E 480 80 3c 00", "E soon 80 3c 00"),
             "bad-point.rpp": RPP.replace("PT 4 90 1", "PT soon 90 1"),
             "no-length.rpp": RPP.replace("      LENGTH 4\n", ""),
             "short-marker.rpp": RPP.replace('MARKER 1 5.5 "Verse \'one\'" 0 0 1 B {AAAA} 0', "MARKER 1"),
@@ -473,6 +486,46 @@ class ReaperTest(DawBase):
                 path = self.dir / name
                 path.write_bytes(text.encode("utf-8"))
                 self.assertTrue(self.assert_source_error(path))
+
+    def midi_project(self, events: str) -> str:
+        return RPP.replace("        E 0 90 3c 60\n        E 480 80 3c 00\n        E 480 90 40 60\n        e 960 80 40 00\n"
+                           "        E 0 b0 7b 00\n", events)
+
+    def test_invalid_midi_events_are_skipped_and_counted_not_reported_as_notes(self):
+        events = ("        E 0 90 3c 60\n        E 480 80 3c 00\n        E 0 90 1ff 60\n        E 0 90 3c 200\n"
+                  "        E 0 10 3c 60\n        E 0 f0 3c 60\n        E 0 90 -3c 60\n        E 0 90 zz 60\n"
+                  "        E 0 90\n        E 0 90 40 60\n        E 480 80 40 00\n")
+        data = self.evidence("--project", self.write(self.midi_project(events)), "--detail", "full")
+        notes = sorted((item["value"]["pitch"], item["value"]["velocity"]) for item in self.facts(data, "project.note"))
+        self.assertEqual(notes, [(60, 96), (64, 96)])
+        warning = next(item for item in data["diagnostics"] if item["code"] == "reaper_invalid_midi_event")
+        self.assertIn("7 MIDI", warning["message"])
+        self.assertEqual(self.one(data, "project.track_notes", "project_track:1")["value"]["noteCount"], 2)
+
+    def test_two_byte_midi_events_are_accepted(self):
+        events = ("        E 0 c0 05\n        E 0 d0 40\n        E 0 90 3c 60\n        E 480 80 3c 00\n"
+                  "        E 480 e0 00 40\n")
+        data = self.evidence("--project", self.write(self.midi_project(events)), "--detail", "full")
+        self.assertEqual([item["value"]["pitch"] for item in self.facts(data, "project.note")], [60])
+        self.assertFalse([item for item in data["diagnostics"] if item["code"] == "reaper_invalid_midi_event"])
+
+    def test_tempo_ramps_lower_the_tempo_map_confidence_and_are_reported(self):
+        steps = self.evidence("--project", self.write())
+        ramp = self.evidence("--project", self.write(RPP.replace("PT 4 90 1", "PT 4 90 0"), "ramp.rpp"))
+        self.assertTrue(any(item["code"] == "reaper_tempo_ramps" for item in ramp["diagnostics"]))
+        self.assertFalse(any(item["code"] == "reaper_tempo_ramps" for item in steps["diagnostics"]))
+        before, after = self.one(steps, "project.tempo_map"), self.one(ramp, "project.tempo_map")
+        order = ["low", "medium", "high"]
+        self.assertLess(order.index(after["confidence"]), order.index(before["confidence"]))
+        self.assertIn("ramp", after["confidenceReason"])
+        missing = self.evidence("--project", self.write(RPP.replace("PT 4 90 1", "PT 4 90"), "noshape.rpp"))
+        self.assertTrue(any(item["code"] == "reaper_tempo_ramps" for item in missing["diagnostics"]))
+
+    def test_tempo_points_at_the_same_time_keep_file_order(self):
+        text = RPP.replace("    PT 0 120 1\n    PT 4 90 1\n", "    PT 0 120 1\n    PT 0 60 1\n    PT 4 90 1\n")
+        data = self.evidence("--project", self.write(text))
+        self.assertEqual([point["bpm"] for point in self.one(data, "project.tempo_map")["value"]], [120.0, 60.0, 90.0])
+
 
     def test_signature_mismatch_and_notes_text_blocks_are_handled(self):
         other = self.dir / "other.rpp"

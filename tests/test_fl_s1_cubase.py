@@ -159,7 +159,7 @@ class FlStudioTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.track_count"), [2])
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
             "project_track:0": {"name": "Lead", "kind": "instrument", "index": 0},
-            "project_track:1": {"name": "Kick", "kind": "audio", "index": 1}})
+            "project_track:1": {"name": "Kick", "kind": "unknown", "index": 1}})
         self.assertEqual([(item["value"], item["scope"]) for item in self.items(data, "project.plugin")],
                          [({"name": "3x Osc", "track": 0}, "project_track:0"),
                           ({"name": "Fruity Reeverb 2", "track": None}, "project")])
@@ -243,6 +243,66 @@ class FlStudioTest(ProjectCliTest):
         self.assertTrue(flstudio.detect(path))
         path.write_bytes(path.read_bytes()[:14] + b"XXXX" + path.read_bytes()[18:])
         self.assertFalse(flstudio.detect(path))
+
+
+    def test_wrapped_vst_is_named_by_its_display_name_at_low_confidence(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 4), text(201, "Fruity Wrapper"),
+                  text(203, "Serum"), word(64, 1), byte(21, 4), text(201, "Fruity Wrapper"),
+                  word(98, 0), text(201, "Fruity Wrapper"), text(203, "Valhalla Room"),
+                  word(98, 1), text(201, "Fruity Wrapper"), word(98, 2), text(201, "Fruity Limiter"), text(203, "Master Limiter")]
+        data = self.project(self.write(events=events, channels=2))
+        plugins = {(item["value"]["name"], item["scope"]): item for item in self.items(data, "project.plugin")}
+        self.assertEqual(sorted(plugins), [("Fruity Limiter", "project"), ("Fruity Wrapper", "project"),
+                                           ("Fruity Wrapper", "project_track:1"), ("Serum", "project_track:0"),
+                                           ("Valhalla Room", "project")])
+        for key in (("Serum", "project_track:0"), ("Valhalla Room", "project"), ("Fruity Wrapper", "project_track:1"),
+                    ("Fruity Wrapper", "project")):
+            self.assertEqual(plugins[key]["confidence"], "low", key)
+            self.assertIn("Fruity Wrapper", plugins[key]["confidenceReason"], key)
+        self.assertEqual(plugins[("Fruity Limiter", "project")]["confidence"], "medium")
+        self.assertEqual(self.values(data, "flstudio.channel")[0]["plugin"], "Fruity Wrapper")
+
+    def test_channel_kinds_follow_the_stored_type_and_sample(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 0), word(64, 1), byte(21, 4), text(196, "C:\\a\\hit.wav"),
+                  word(64, 2), byte(21, 2), text(196, "C:\\a\\clip.wav"), word(64, 3), byte(21, 4), text(201, "Fruity Wrapper"),
+                  text(196, "C:\\a\\x.wav"), word(64, 4), byte(21, 99)]
+        data = self.project(self.write(events=events, channels=5))
+        kinds = [item["value"]["kind"] for item in sorted(self.items(data, "project.track"), key=lambda item: item["value"]["index"])]
+        self.assertEqual(kinds, ["unknown", "audio", "audio", "instrument", "unknown"])
+
+    def test_layout_dependent_facts_are_not_high_confidence(self):
+        data = self.project(self.write())
+        for property in ("flstudio.time_signature", "flstudio.arrangement", "flstudio.channel", "project.track",
+                         "project.plugin", "project.track_count", "project.clip_count", "project.media_reference"):
+            items = self.items(data, property)
+            self.assertTrue(items, property)
+            for item in items:
+                self.assertNotEqual(item["confidence"], "high", property)
+        self.assertEqual(self.items(data, "project.application")[0]["confidence"], "high")
+
+    def test_playlist_item_size_follows_the_version_and_never_guesses(self):
+        def arrangement(version, count, size):
+            items = b"".join(playlist_item(index * 96, 96, 20481, size=size) for index in range(count))
+            return [event(199, version.encode() + b"\0"), word(99, 1), text(241, "Main"), event(233, items)]
+        old = self.project(self.write("old15.flp", events=arrangement("20.8.3.2304", 15, 32)))
+        self.assertEqual(self.values(old, "flstudio.arrangement")[0]["itemCount"], 15)
+        self.assertEqual(self.values(old, "project.clip_count"), [15])
+        new = self.project(self.write("new8.flp", events=arrangement("21.0.3.3517", 8, 60)))
+        self.assertEqual(self.values(new, "flstudio.arrangement")[0]["itemCount"], 8)
+        wrong = self.project(self.write("wrong.flp", events=arrangement("20.8.3.2304", 3, 60)))
+        self.assertEqual(wrong["sources"][0]["status"], "ok")
+        self.assertEqual(self.values(wrong, "flstudio.arrangement"), [])
+        self.assertTrue(any(item["code"] == "flp_event_skipped" and "32 byte" in item["message"] for item in wrong["diagnostics"]))
+
+    def test_rejects_a_project_with_too_many_notes(self):
+        count = flstudio.MAX_NOTES + 1
+        events = [event(199, b"20.8.3.2304\0"), word(65, 1), event(224, note(0, 96, 60) * count)]
+        self.assert_rejected(self.write("many.flp", events=events), "notes")
+
+    def test_empty_plugin_name_event_keeps_the_earlier_channel_name(self):
+        events = [event(199, b"20.8.3.2304\0"), word(64, 0), byte(21, 2), text(203, "Lead"), text(203, ""), text(201, "3x Osc")]
+        data = self.project(self.write(events=events, channels=1))
+        self.assertEqual(self.values(data, "project.track")[0]["name"], "Lead")
 
 
 SONG_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -334,7 +394,7 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.track")}, {
             "project_track:0": {"name": "Vox", "kind": "audio", "index": 0},
             "project_track:1": {"name": "Keys", "kind": "instrument", "index": 1},
-            "project_track:2": {"name": "Group", "kind": "unknown", "index": 2}})
+            "project_track:2": {"name": "Group", "kind": "folder", "index": 2}})
         self.assertEqual({item["scope"]: item["value"] for item in self.items(data, "project.clip_count")},
                          {"project_track:0": 1, "project_track:1": 1, "project_track:2": 0})
         self.assertEqual([(item["value"]["name"], item["scope"]) for item in self.items(data, "project.plugin")],
@@ -409,6 +469,51 @@ class StudioOneTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.media_reference"), [])
         self.assertEqual(len([item for item in data["diagnostics"] if item["code"] == "studioone_part_unreadable"]), 2)
         self.assertEqual(len(self.values(data, "project.track")), 3)
+
+
+    def invalid(self, data, fragment):
+        return [item for item in data["diagnostics"] if item["code"] == "studioone_attribute_invalid"
+                and fragment in item["message"]]
+
+    def test_unparsable_attributes_skip_the_item_with_a_warning(self):
+        song = song_xml().replace('<MarkerEvent start="16" timeFormat="2" name="Chorus"/>',
+                                  '<MarkerEvent start="abc" timeFormat="2" name="Chorus"/>')
+        data = self.project(self.write(song=song))
+        self.assertEqual([item["value"]["name"] for item in self.items(data, "project.marker")], ["Start"])
+        self.assertTrue(self.invalid(data, "start"), data["diagnostics"])
+        only = song_xml(tempos='<TempoMapSegment curveType="0" start="junk" end="1e200" tempo="0.5"/>')
+        data = self.project(self.write("tempo.song", song=only))
+        self.assertEqual(self.values(data, "tempo") + self.values(data, "project.tempo_map"), [])
+        self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "start='junk'" in item["message"]
+                            for item in data["diagnostics"]), data["diagnostics"])
+        rate = song_xml().replace('sampleRate="44100"', 'sampleRate="fast"')
+        data = self.project(self.write("rate.song", song=rate))
+        self.assertTrue(self.invalid(data, "sampleRate"), data["diagnostics"])
+
+    def test_dropped_tempo_and_meter_segments_are_reported_and_block_a_static_claim(self):
+        for bad in ('tempo="0"', 'tempo="junk"'):
+            tempos = ONE_TEMPO + f'<TempoMapSegment curveType="0" start="32" end="1e200" {bad}/>'
+            data = self.project(self.write("t.song", song=song_xml(tempos=tempos)))
+            self.assertEqual(self.values(data, "tempo"), [], bad)
+            self.assertEqual(self.values(data, "project.tempo_map"), [[{"beat": 0.0, "bpm": 120.0}]], bad)
+            self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "tempo" in item["message"]
+                                for item in data["diagnostics"]), bad)
+        for numerator, denominator in (("1e300", "4"), ("3", "3"), ("0", "4"), ("3", "0"), ("2.5", "4"), ("3", "256")):
+            meters = ONE_METER + (f'<TimeSignatureMapSegment start="32" numerator="{numerator}" denominator="{denominator}"/>')
+            data = self.project(self.write("m.song", song=song_xml(meters=meters)))
+            self.assertEqual(self.values(data, "meter"), [], (numerator, denominator))
+            self.assertTrue(any(item["code"] == "studioone_segment_dropped" and "signature" in item["message"]
+                                for item in data["diagnostics"]), (numerator, denominator))
+
+    def test_empty_insert_slots_folders_and_empty_names(self):
+        mixer = MIXER_XML.replace('<Attributes x:id="Presets" pname="default"/>',
+                                  '<Attributes name="FX02"/><Attributes name="FX03"><Attributes x:id="deviceData"/></Attributes>')
+        song = song_xml().replace('<MediaTrack mediaType="Music" name="Keys">', '<MediaTrack mediaType="Music" name="">')
+        data = self.project(self.write(song=song, **{"Devices/audiomixer.xml": mixer}))
+        self.assertEqual([item["value"]["name"] for item in self.items(data, "project.plugin")],
+                         ["Pro EQ", "Limiter", "Room Reverb"])
+        tracks = {item["value"]["index"]: item["value"] for item in self.items(data, "project.track")}
+        self.assertEqual((tracks[1]["name"], tracks[2]["kind"]), (None, "folder"))
 
 
 def cm(value, bom=False):
@@ -594,6 +699,43 @@ class CubaseTest(ProjectCliTest):
         self.assertEqual(self.values(data, "project.application"), ["Cubase 12.0.50"])
         self.assertTrue(any(item["code"] == "cubase_deep_parse_failed" and "too many candidate" in item["message"]
                             for item in data["diagnostics"]))
+
+
+    def test_non_finite_metadata_floats_are_rejected_and_keep_the_application(self):
+        for name, kwargs in {"nan-tempo": dict(tempo=float("nan")), "inf-rate": dict(rate=float("inf")),
+                             "neg-inf-tempo": dict(tempo=float("-inf"))}.items():
+            with self.subTest(name=name):
+                result = self.run_cli("--project", self.write(f"{name}.cpr", meta=metadata(**kwargs)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("NaN", result.stdout)
+                self.assertNotIn("Infinity", result.stdout)
+                data = json.loads(result.stdout)
+                self.assertEqual(self.values(data, "project.application"), ["Cubase 12.0.50"])
+                self.assertEqual(self.values(data, "tempo") + self.values(data, "project.sample_rate"), [])
+                self.assertTrue(any(item["code"] == "cubase_deep_parse_failed" and "finite" in item["message"]
+                                    for item in data["diagnostics"]))
+
+    def test_implausible_tempo_and_sample_rate_are_reported_not_mapped(self):
+        for name, kwargs, fragment in (("tempo", dict(tempo=1e12), "MusicalTempo"), ("fast", dict(tempo=5000.0), "MusicalTempo"),
+                                       ("rate", dict(rate=1e12), "AudioSampleRate"), ("slow", dict(rate=3.0), "AudioSampleRate")):
+            with self.subTest(name=name):
+                data = self.project(self.write(f"{name}.cpr", meta=metadata(**kwargs)))
+                self.assertEqual(self.values(data, "tempo") if "tempo" in kwargs else self.values(data, "project.sample_rate"), [])
+                self.assertTrue(any(item["code"] == "cubase_value_out_of_range" and fragment in item["message"]
+                                    for item in data["diagnostics"]), data["diagnostics"])
+                self.assertEqual(len(self.values(data, "cubase.media_attribute")), 4)
+
+    def test_media_name_scan_counts_every_examined_match(self):
+        junk = b"x.wav\0\xef\xbb\xbf" * (cubase.MAX_MATCHES + 100)
+        valid = cm("Late.wav", bom=True)
+        data = self.project(self.write(arrange=arrangement(()) + junk + valid))
+        self.assertNotIn("Late.wav", [item["value"]["basename"] for item in self.items(data, "project.media_reference")])
+        self.assertTrue(any(item["code"] == "cubase_scan_limit" for item in data["diagnostics"]), data["diagnostics"])
+
+    def test_plugin_facts_warn_that_built_in_modules_are_included(self):
+        data = self.project(self.write())
+        for item in self.items(data, "project.plugin"):
+            self.assertIn("built-in", item["confidenceReason"])
 
 
 if __name__ == "__main__":

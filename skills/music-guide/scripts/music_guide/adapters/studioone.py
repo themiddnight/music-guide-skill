@@ -17,6 +17,7 @@ from xml.etree.ElementTree import Element
 from ..model import Detail, Diagnostic, Evidence
 from ..project import ProjectFacts, TrackKind, plausible_meter, plausible_tempo
 from .common import MAX_XML_BYTES, MAX_ZIP_BYTES, _finite_number, _local, _parse_xml, _read_zip_member
+from .graded import GradedFacts
 
 METHOD = "studioone-xml"
 SONG_MEMBER = "Song/song.xml"
@@ -28,6 +29,10 @@ EOCD = b"PK\x05\x06"
 EVENT_TAG = re.compile(r"Event$|^MusicPart$|^AudioPart$|^Part$")
 STRUCTURE_TRACKS = frozenset({"MarkerTrack", "ArrangerTrack"})
 MEDIA_KINDS: dict[str, TrackKind] = {"Audio": "audio", "Music": "instrument"}
+FOLDER_TRACKS = frozenset({"FolderTrack"})
+MAX_NUMERATOR = 128
+DENOMINATORS = frozenset({1, 2, 4, 8, 16, 32, 64, 128})
+ABSENT_START = "The start attribute is absent in the file, so position 0 is assumed."
 SAMPLE_RATE_LOCATOR = "Song/song.xml timeContext/@sampleRate"
 UNDECLARED_PREFIX = re.compile(rb'<(/?)([^\s/>!?][^\s/>]*)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|\'[^\']*\'))*)\s*(/?)>')
 GENERATOR = re.compile(r"^(.+?)/(\d[\w.]*)$")
@@ -109,13 +114,23 @@ def _children(parent: Element | None, tag: str | None = None) -> list[Element]:
 
 
 def _number(element: Element, name: str, default: float | None = None) -> float | None:
+    """The attribute as a finite number. Only an absent attribute yields `default`; a present one that does not
+    parse raises ValueError so the caller can skip the item and say so."""
     value = element.attrib.get(name)
     if value is None:
         return default
     try:
         return _finite_number(float(value), name)
     except ValueError:
-        return default
+        raise ValueError(f"{_local(element.tag)} attribute {name}={value[:40]!r} is not a finite number") from None
+
+
+def _warn(evidence: Evidence, source_id: str, message: str, code: str = "studioone_attribute_invalid") -> None:
+    evidence.diagnostics.append(Diagnostic(code, "warning", message, source_id))
+
+
+def _name(element: Element) -> str | None:
+    return _text(element.attrib.get("name", "")) or None
 
 
 def _text(value: str) -> str:
@@ -181,16 +196,20 @@ def studioone(path: Path, source_id: str, evidence: Evidence, detail: Detail) ->
     channel_to_track: dict[str, int] = {}
     for index, track in enumerate(tracks):
         tag, media_type = _local(track.tag), track.attrib.get("mediaType")
-        kind = MEDIA_KINDS.get(media_type or "", "unknown") if tag == "MediaTrack" else "unknown"
+        kind = MEDIA_KINDS.get(media_type or "", "unknown") if tag == "MediaTrack" else (
+            "folder" if tag in FOLDER_TRACKS else "unknown")
         locator = f"Song/song.xml Tracks/{tag}[{index}]"
-        facts.track(index, _text(track.attrib["name"]) if "name" in track.attrib else None, kind, locator)
+        facts.track(index, _name(track), kind, locator)
         evidence.add(source_id, "studioone.track_type", {"element": tag, "mediaType": media_type}, "element",
                      f"project_track:{index}", "static", locator, METHOD, "extracted", "high",
                      "Stored track element name and mediaType attribute.")
         channel = _by_xid(track, "channelID")
         if channel is not None and "uid" in channel.attrib:
             channel_to_track[channel.attrib["uid"]] = index
-        facts.clip_count(_clip_count(track), locator, index)
+        try:
+            facts.clip_count(_clip_count(track), locator, index)
+        except ValueError as error:
+            _warn(evidence, source_id, f"Clips of {tag}[{index}] were not counted: {error}.")
     _emit_markers(facts, evidence, source_id, structure)
     _emit_mixer(facts, evidence, source_id, mixer, channel_to_track)
     facts.media_references(media_urls, "Song/mediapool.xml AudioClip Url")
@@ -205,14 +224,19 @@ def studioone(path: Path, source_id: str, evidence: Evidence, detail: Detail) ->
 def _emit_timeline(facts: ProjectFacts, evidence: Evidence, source_id: str, context: Element | None,
                    meta: dict[str, str]) -> None:
     rates = []
-    if context is not None and (rate := _number(context, "sampleRate")):
-        rates.append((rate, SAMPLE_RATE_LOCATOR))
+    if context is not None:
+        try:
+            if rate := _number(context, "sampleRate"):
+                rates.append((rate, SAMPLE_RATE_LOCATOR))
+        except ValueError as error:
+            _warn(evidence, source_id, f"The song sample rate was skipped: {error}.")
     if meta.get("Media:SampleRate"):
         try:
             rates.append((_finite_number(float(meta["Media:SampleRate"]), "sample rate", positive=True),
                           "metainfo.xml Media:SampleRate"))
         except ValueError:
-            pass
+            _warn(evidence, source_id, f"metainfo.xml Media:SampleRate={meta['Media:SampleRate'][:40]!r} "
+                  f"is not a finite positive number and was skipped.")
     for rate, locator in rates:
         if rate > 0:
             facts.sample_rate(int(rate) if rate.is_integer() else rate, locator)
@@ -220,40 +244,88 @@ def _emit_timeline(facts: ProjectFacts, evidence: Evidence, source_id: str, cont
         facts.key(meta["Media:KeySignature"], "metainfo.xml Media:KeySignature")
     if context is None:
         return
-    tempos = []
-    for segment in _children(_by_xid(context, "tempoMap"), "TempoMapSegment"):
-        seconds_per_beat, start = _number(segment, "tempo"), _number(segment, "start", 0.0)
-        if seconds_per_beat and seconds_per_beat > 0 and plausible_tempo(60 / seconds_per_beat):
-            tempos.append((start, round(60 / seconds_per_beat, 6), _number(segment, "curveType", 0.0) != 0))
+    _emit_tempos(facts, evidence, source_id, context)
+    _emit_meters(facts, evidence, source_id, context)
+    keys = []
+    for item in _children(_by_xid(context, "keySignatureMap")):
+        try:
+            keys.append({"beat": _number(item, "start", 0.0), "root": item.attrib.get("root"),
+                         "scale": item.attrib.get("scale")})
+        except ValueError as error:
+            _warn(evidence, source_id, f"A key signature entry was skipped: {error}.")
+    if keys:
+        evidence.add(source_id, "studioone.key_signature_map", keys, "key", "project", "project_beats",
+                     "Song/song.xml timeContext/keySignatureMap", METHOD, "extracted", "medium",
+                     "Stored key signature entries; the root numbering is not decoded.")
+
+
+def _dropped(evidence: Evidence, source_id: str, what: str, index: int, why: str) -> None:
+    _warn(evidence, source_id, f"{what} segment {index} was dropped: {why}.", "studioone_segment_dropped")
+
+
+def _emit_tempos(facts: ProjectFacts, evidence: Evidence, source_id: str, context: Element) -> None:
+    tempos, dropped, defaulted = [], False, False
+    for index, segment in enumerate(_children(_by_xid(context, "tempoMap"), "TempoMapSegment")):
+        try:
+            seconds_per_beat = _number(segment, "tempo")
+            if seconds_per_beat is None or seconds_per_beat <= 0:
+                raise ValueError(f"tempo must be a positive number of seconds per quarter note, found "
+                                 f"{segment.attrib.get('tempo')!r}")
+            if not plausible_tempo(60 / seconds_per_beat):
+                raise ValueError(f"tempo {60 / seconds_per_beat:g} BPM is outside the plausible range")
+            start, ramp = _number(segment, "start", 0.0), _number(segment, "curveType", 0.0) != 0
+        except ValueError as error:
+            _dropped(evidence, source_id, "tempo", index, str(error))
+            dropped = True
+            continue
+        defaulted |= "start" not in segment.attrib
+        tempos.append((start, round(60 / seconds_per_beat, 6), ramp))
     tempos.sort()
-    if len(tempos) == 1 and tempos[0][0] == 0:
+    if defaulted:
+        evidence.diagnostics.append(Diagnostic("studioone_start_defaulted", "info",
+            f"A tempo segment has no start attribute; {ABSENT_START}", source_id))
+    if len(tempos) == 1 and tempos[0][0] == 0 and not dropped:
+        reason = "Stored tempo map with one segment (seconds per quarter note converted to BPM)."
         facts.tempo(tempos[0][1], "Song/song.xml timeContext/tempoMap/TempoMapSegment",
-                    "Stored tempo map with one segment (seconds per quarter note converted to BPM).")
+                    f"{reason} {ABSENT_START}" if defaulted else reason)
     elif tempos:
         facts.tempo_map([{"beat": start, "bpm": bpm} for start, bpm, _ in tempos],
                         "Song/song.xml timeContext/tempoMap")
         if any(ramp for *_, ramp in tempos):
             evidence.diagnostics.append(Diagnostic("studioone_tempo_ramps", "info",
                 "Some tempo segments are ramps; the tempo map lists their start tempo only.", source_id))
-    meters = []
-    for segment in _children(_by_xid(context, "timeSignatureMap"), "TimeSignatureMapSegment"):
-        numerator, denominator = _number(segment, "numerator"), _number(segment, "denominator")
-        if numerator and denominator and plausible_meter(numerator, denominator):
-            meters.append((_number(segment, "start", 0.0), int(numerator), int(denominator)))
+
+
+def _emit_meters(facts: ProjectFacts, evidence: Evidence, source_id: str, context: Element) -> None:
+    meters, dropped, defaulted = [], False, False
+    for index, segment in enumerate(_children(_by_xid(context, "timeSignatureMap"), "TimeSignatureMapSegment")):
+        try:
+            numerator, denominator = _number(segment, "numerator"), _number(segment, "denominator")
+            start = _number(segment, "start", 0.0)
+            if (numerator is None or denominator is None or not numerator.is_integer() or not denominator.is_integer()
+                    or not 1 <= numerator <= MAX_NUMERATOR or int(denominator) not in DENOMINATORS
+                    or not plausible_meter(int(numerator), int(denominator))):
+                raise ValueError(f"signature {segment.attrib.get('numerator')!r}/{segment.attrib.get('denominator')!r} "
+                                 f"needs a whole numerator of 1-{MAX_NUMERATOR} and a power-of-two denominator")
+        except ValueError as error:
+            _dropped(evidence, source_id, "time signature", index, str(error))
+            dropped = True
+            continue
+        defaulted |= "start" not in segment.attrib
+        meters.append((start, int(numerator), int(denominator)))
     meters.sort()
-    if len(meters) == 1 and meters[0][0] == 0:
-        facts.meter(meters[0][1], meters[0][2], "Song/song.xml timeContext/timeSignatureMap")
+    if defaulted:
+        evidence.diagnostics.append(Diagnostic("studioone_start_defaulted", "info",
+            f"A time signature segment has no start attribute; {ABSENT_START}", source_id))
+    if len(meters) == 1 and meters[0][0] == 0 and not dropped:
+        facts.meter(meters[0][1], meters[0][2], "Song/song.xml timeContext/timeSignatureMap",
+                    "Stored project meter; meter changes are not reconstructed."
+                    + (f" {ABSENT_START}" if defaulted else ""))
     elif meters:
         evidence.add(source_id, "studioone.meter_map", [{"beat": start, "numerator": n, "denominator": d}
                      for start, n, d in meters], "signature", "project", "project_beats",
                      "Song/song.xml timeContext/timeSignatureMap", METHOD, "extracted", "high",
                      "Stored time signature changes in beat order.")
-    keys = [{"beat": _number(item, "start", 0.0), "root": item.attrib.get("root"), "scale": item.attrib.get("scale")}
-            for item in _children(_by_xid(context, "keySignatureMap"))]
-    if keys:
-        evidence.add(source_id, "studioone.key_signature_map", keys, "key", "project", "project_beats",
-                     "Song/song.xml timeContext/keySignatureMap", METHOD, "extracted", "medium",
-                     "Stored key signature entries; the root numbering is not decoded.")
 
 
 def _clip_count(track: Element) -> int:
@@ -268,23 +340,29 @@ def _clip_count(track: Element) -> int:
 
 
 def _emit_markers(facts: ProjectFacts, evidence: Evidence, source_id: str, structure: list[Element]) -> None:
+    assumed = GradedFacts(evidence, source_id, METHOD, facts.detail, grade="medium", caveat=ABSENT_START)
     for track in structure:
         kind = _local(track.tag)
         for index, event in enumerate(item for item in track if EVENT_TAG.search(_local(item.tag))):
-            start, length = _number(event, "start", 0.0), _number(event, "length")
+            try:
+                start, length = _number(event, "start", 0.0), _number(event, "length")
+            except ValueError as error:
+                _warn(evidence, source_id, f"{kind} event {index} was skipped: {error}.")
+                continue
             timeformat = event.attrib.get("timeFormat", track.attrib.get("timeFormat", "2"))
             if timeformat != "2":
                 evidence.diagnostics.append(Diagnostic("studioone_time_format", "warning",
                     f"{kind} event {index} uses timeFormat {timeformat!r}, not quarter-note beats; skipped.", source_id))
                 continue
-            name = _text(event.attrib["name"]) if "name" in event.attrib else None
+            name = _name(event)
             locator = f"Song/song.xml {kind}[{index}]"
             if kind == "MarkerTrack":
-                facts.marker(name, start, "beats", locator)
+                (facts if "start" in event.attrib else assumed).marker(name, start, "beats", locator)
             else:
                 evidence.add(source_id, "studioone.arranger_section", {"name": name, "startBeat": start,
                              "lengthBeats": length}, "section", "project", "project_beats", locator, METHOD,
-                             "extracted", "high", "Stored arranger section.")
+                             "extracted", "high" if "start" in event.attrib else "medium",
+                             "Stored arranger section." + ("" if "start" in event.attrib else f" {ABSENT_START}"))
 
 
 def _media_pool(pool: Element | None) -> tuple[list[str], int]:
@@ -312,7 +390,7 @@ def _mixer(root: Element | None) -> list[tuple[str | None, str, list[str]]]:
                         continue
                     device = _by_xid(slot, "deviceData")
                     ghost = _by_xid(_by_xid(slot, "ghostData"), "classInfo")
-                    name = next((item.attrib["name"] for item in (device, ghost, slot)
+                    name = next((item.attrib["name"] for item in (device, ghost)
                                  if item is not None and item.attrib.get("name")), None)
                     if name:
                         inserts.append(_text(name))

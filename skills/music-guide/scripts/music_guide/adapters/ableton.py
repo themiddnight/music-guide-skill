@@ -169,6 +169,7 @@ class _ClipNotes:
     looped: int = 0
     outside: int = 0
     muted: int = 0
+    clamped: int = 0
 
 
 def _clip_window(clip: Element, arrangement: bool) -> tuple[float, float, float, bool] | None:
@@ -213,7 +214,9 @@ def _read_clip_notes(clip: Element, arrangement: bool, into: _ClipNotes) -> None
                 into.outside += 1
             else:
                 start = base + max(time - marker, 0.0)
-                into.notes.append(Note(int(pitch), max(0, min(127, round(velocity))), start,
+                rounded = round(velocity)
+                into.clamped += not 0 <= rounded <= 127
+                into.notes.append(Note(int(pitch), max(0, min(127, rounded)), start,
                                        min(start + duration, base + length)))
             if len(into.notes) > MAX_NOTES:
                 raise ValueError(f"Ableton set exceeds {MAX_NOTES} notes")
@@ -235,13 +238,14 @@ def _session_reason(stats: _ClipNotes) -> str:
             f"notes are excluded, and {stats.untimed} clips without readable loop fields are skipped.")
 
 
-def _device_name(device: Element) -> str:
+def _plugin_name(device: Element) -> str | None:
+    """The third-party plugin name stored in the device's PluginDesc, or None for any other device element."""
     description = device.find("PluginDesc")
     for info, field_name in PLUGIN_INFO:
         name = _text(None if description is None else description.find(f"{info}/{field_name}"))
         if name:
             return name
-    return device.tag
+    return None
 
 
 def _sample_names(live_set: Element) -> list[str]:
@@ -312,6 +316,10 @@ def _track_clips(facts: ProjectFacts, track: _Track) -> tuple[int, int]:
         for clip in clips:
             if clip.tag == "MidiClip":
                 _read_clip_notes(clip, is_arrangement, stats)
+        if stats.clamped:
+            facts.evidence.diagnostics.append(Diagnostic("ableton_velocity_clamped", "warning",
+                f"{stats.clamped} note(s) in Ableton track {track.index} have a velocity outside 0-127 and were "
+                "clamped into range.", facts.source_id))
         if not stats.notes:
             continue
         locator = f"{base}/{'ClipTimeable' if is_arrangement else 'ClipSlotList'}//MidiClip"
@@ -360,13 +368,21 @@ def _parse(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> No
     arrangement_total = session_total = 0
     for track in tracks:
         facts.track(track.index, _track_name(track.element), track.kind, track.locator)
-        devices += [(_device_name(device), track.index, f"{track.locator}//Devices/{device.tag}")
+        devices += [(_plugin_name(device), device.tag, track.index, f"{track.locator}//Devices/{device.tag}")
                     for chain in track.element.iter("Devices") for device in chain]
         arrangement, session = _track_clips(facts, track)
         arrangement_total += arrangement
         session_total += session
-    for name, index, locator in capped(devices, "devices", source_id, evidence):
-        facts.plugin(name, index, locator)
+    for plugin, element, index, locator in capped(devices, "devices", source_id, evidence):
+        if plugin is not None:
+            facts.plugin(plugin, index, locator)
+        else:
+            evidence.add(source_id, "ableton.device",
+                         {"name": element, "track": index, "builtin": not element.startswith("MxDevice")}, "device",
+                         f"project_track:{index}", "static", locator, METHOD, "extracted", "medium",
+                         "Built-in Ableton device element name from the set XML (a Max for Live device when "
+                         "builtin is false); it is an internal tag, not the label shown in Live, and the device "
+                         "was not loaded.")
     if live_set.find("Tracks") is not None or master is not None:
         facts.track_count(len(tracks), "LiveSet/Tracks")
         facts.clip_count(arrangement_total, "LiveSet/Tracks//ClipTimeable")
