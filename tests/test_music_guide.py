@@ -14,9 +14,9 @@ import mido
 import numpy as np
 import soundfile as sf
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
-sys.path.insert(0, str(SKILL / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import ROOT, SKILL, assert_matches_subprocess, run_cli  # noqa: E402
 
 from music_guide.adapters.common import _gunzip_bounded, _media_basename, _read_zip_member  # noqa: E402
 from music_guide.model import Evidence, detect_conflicts  # noqa: E402
@@ -37,9 +37,7 @@ class MusicGuideTest(unittest.TestCase):
 
     def run_cli(self, *args, script=None, mixdown=True):
         prefix = ["--mixdown", str(self.mix)] if mixdown else []
-        return subprocess.run([sys.executable, str(script or SKILL / "scripts" / "analyze.py"),
-                               *prefix, *map(str, args)], cwd=self.dir,
-                              text=True, capture_output=True)
+        return run_cli(*prefix, *args, cwd=self.dir, script=script)
 
     def evidence(self, *args, mixdown=True):
         result = self.run_cli(*args, mixdown=mixdown)
@@ -52,6 +50,15 @@ class MusicGuideTest(unittest.TestCase):
         self.assertTrue(all(set(item["sourceIds"]) <= source_ids for item in data["observations"]))
         self.assertTrue(all(set(item["observationIds"]) <= observation_ids for item in data["conflicts"]))
         return data
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        ok = assert_matches_subprocess(self, "--mixdown", self.mix, cwd=self.dir)
+        self.assertEqual((ok.returncode, ok.stderr), (0, ""))
+        no_input = assert_matches_subprocess(self, cwd=self.dir)
+        self.assertEqual(no_input.returncode, 2)
+        self.assertIn("usage: analyze.py", no_input.stderr)
+        bad_flag = assert_matches_subprocess(self, "--mixdown", self.mix, "--detail", "everything", cwd=self.dir)
+        self.assertEqual(bad_flag.returncode, 2)
 
     def test_audio_metrics_silence_and_stem_scope(self):
         data = self.evidence()

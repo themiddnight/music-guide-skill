@@ -14,9 +14,9 @@ from unittest import mock
 import numpy as np
 import soundfile as sf
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
-sys.path.insert(0, str(SKILL / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import ROOT, SKILL, run_cli  # noqa: E402
 
 
 def smf(track: bytes, ticks: int = 480) -> bytes:
@@ -36,8 +36,7 @@ class CliCase(unittest.TestCase):
 
     def run_cli(self, *args, mixdown=True):
         prefix = ["--mixdown", str(self.mix)] if mixdown else []
-        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *prefix, *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+        return run_cli(*prefix, *args, cwd=self.dir)
 
     def evidence(self, *args, mixdown=True):
         result = self.run_cli(*args, mixdown=mixdown)

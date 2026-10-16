@@ -4,17 +4,20 @@ import json
 import os
 import plistlib
 import stat
-import subprocess
 import sys
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 import jsonschema
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
+from music_guide.adapters import logic  # noqa: E402
+
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 
 
@@ -25,8 +28,7 @@ class ProjectCliCase(unittest.TestCase):
         self.dir = Path(self.tmp.name)
 
     def run_cli(self, *args, **options):
-        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True, timeout=120, **options)
+        return run_cli(*args, cwd=self.dir, **options)
 
     def evidence(self, *args):
         result = self.run_cli(*args)
@@ -67,6 +69,11 @@ class LogicPackageTest(ProjectCliCase):
             (folder / "ProjectData").write_bytes(b"\x00binary that must never be parsed")
             (folder / "MetaData.plist").write_bytes(plistlib.dumps(self.meta(number, meta), fmt=fmt))
         return package
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        result = assert_matches_subprocess(self, "--project", self.make_package(), cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["status"], "ok")
 
     @staticmethod
     def meta(number, overrides=None):
@@ -225,13 +232,22 @@ class LogicPackageTest(ProjectCliCase):
                 self.assertIn("not a regular file", self.failed(package))
 
     def test_bundled_media_directories_count_toward_the_walk_cap(self):
+        # The cap is a module constant, so a patched cap of 50 proves the same rule as 50,000 directories: every
+        # entry, directories included, counts toward it, and the entry that crosses it truncates the walk.
+        self.assertEqual(logic.MAX_MEDIA_ENTRIES, 50_000)
         package = self.make_package()
         media = package / "Media"
         media.mkdir()
-        for number in range(50_001):
+        for number in range(51):
             (media / f"d{number}").mkdir()
-        data = self.project(package)
-        self.assertEqual(self.values(data, "logic.bundled_media"), [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+        with mock.patch.object(logic, "MAX_MEDIA_ENTRIES", 50):
+            data = self.project(package)
+            self.assertEqual(self.values(data, "logic.bundled_media"),
+                             [{"fileCount": 0, "linksNotFollowed": 0, "truncated": True}])
+            (media / "d50").rmdir()
+            data = self.project(package)
+            self.assertEqual(self.values(data, "logic.bundled_media"),
+                             [{"fileCount": 0, "linksNotFollowed": 0, "truncated": False}])
 
     def test_integral_float_sample_rate_is_accepted(self):
         data = self.project(self.make_package(meta={"SampleRate": 44100.0}))
