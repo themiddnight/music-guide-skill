@@ -5,12 +5,17 @@ import contextlib
 import copy
 import io
 import json
+import os
+import random
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import mido
+import numpy
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -86,7 +91,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(metrics)
         for metric in metrics:
             self.assertEqual(metric.score, 1.0, metric)
-        self.assertEqual(evaluate.overall(metrics), 1.0)
+        self.assertEqual(evaluate.family_mean(metrics), (1.0, 7))
 
     def test_evaluate_marks_missing_estimates(self):
         report = {"observations": [observation("audio.duration", 8.0)]}
@@ -95,8 +100,9 @@ class EvaluateTests(unittest.TestCase):
         for metric in metrics:
             self.assertIsNone(metric.score, metric)
             self.assertIn("not reported", metric.detail)
-        self.assertEqual(evaluate.overall(metrics), 0.0)
-        self.assertEqual({m.name for m in metrics}, {m.name for m in evaluate.evaluate(report_from_truth(TRUTH), TRUTH)})
+        self.assertEqual(evaluate.family_mean(metrics), (0.0, 7))
+        perfect = evaluate.evaluate(report_from_truth(TRUTH), TRUTH)
+        self.assertEqual({m.name for m in metrics}, {m.name for m in perfect})
 
     def test_only_keys_present_in_the_truth_are_evaluated(self):
         metrics = evaluate.evaluate(report_from_truth(TRUTH), {"tempoBpm": 120})
@@ -231,7 +237,7 @@ class EvaluateTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("melody raw pitch accuracy", text)
             self.assertIn("not reported", text)
-            self.assertIn("overall", text)
+            self.assertIn("mean of 7 families", text)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 evaluate.main([str(report_path), str(truth_path), "--markdown"])
@@ -244,6 +250,157 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(scores(evaluate.evaluate(report, {"tempoBpm": 120}))["tempo accuracy (beat_grid)"], 1.0)
         report = {"observations": [stem]}
         self.assertEqual(scores(evaluate.evaluate(report, {"tempoBpm": 60}))["tempo accuracy (beat_grid)"], 1.0)
+
+
+def single(prop: str, value, **extra) -> dict:
+    return {"observations": [observation(prop, value)], **extra}
+
+
+def truncation(prop: str) -> dict:
+    return {"code": "estimate_truncated", "severity": "warning", "message": f"{prop} was cut at its cap"}
+
+
+class EvaluateFixTests(unittest.TestCase):
+    def test_melody_ignores_covered_seconds_so_truth_past_the_contour_fails(self):
+        truth = {"melody": [{"startSeconds": 0, "endSeconds": 4, "midi": 60}]}
+        contour = {"contour": [{"startSeconds": 0, "midi": 60}, {"startSeconds": 1, "midi": 60}],
+                   "coveredSeconds": 4.0}
+        metric = evaluate.evaluate(single("audio.melody", contour), truth)[0]
+        self.assertAlmostEqual(metric.score, 0.5, places=2)
+        self.assertNotIn("truncated", metric.detail)
+
+    def test_melody_detail_reports_a_truncation_diagnostic(self):
+        truth = {"melody": [{"startSeconds": 0, "endSeconds": 4, "midi": 60}]}
+        contour = {"contour": [{"startSeconds": 0, "midi": 60}, {"startSeconds": 1, "midi": 60}]}
+        report = single("audio.melody", contour, diagnostics=[truncation("audio.melody")])
+        self.assertIn("truncated", evaluate.evaluate(report, truth)[0].detail)
+        other = single("audio.melody", contour, diagnostics=[truncation("audio.structure")])
+        self.assertNotIn("truncated", evaluate.evaluate(other, truth)[0].detail)
+
+    def test_melody_pitch_on_unvoiced_truth_frames_is_ignored(self):
+        truth = {"melody": [{"startSeconds": 0, "endSeconds": 1, "midi": 60}]}
+        contour = {"contour": [{"startSeconds": 0, "midi": 60}, {"startSeconds": 1, "midi": 99},
+                               {"startSeconds": 2, "midi": 99}]}
+        self.assertEqual(evaluate.evaluate(single("audio.melody", contour), truth)[0].score, 1.0)
+
+    def test_unsorted_truth_and_estimates_are_scored_by_time(self):
+        truth = {"chords": [{"startSeconds": 3, "endSeconds": 6, "label": "F:maj"},
+                            {"startSeconds": 0, "endSeconds": 3, "label": "D:sus2"}]}
+        estimate = {"basis": "beats", "segments": [{"startSeconds": 3, "endSeconds": 6, "chord": "F:maj"},
+                                                   {"startSeconds": 0, "endSeconds": 3, "chord": "D:sus2"}]}
+        metrics = scores(evaluate.evaluate(single("audio.chord_timeline", estimate), truth))
+        self.assertEqual(metrics["chord label overlap"], 1.0)
+        keys = [{"startSeconds": 4, "endSeconds": 8, "tonic": "F", "mode": "major"},
+                {"startSeconds": 0, "endSeconds": 4, "tonic": "D", "mode": "minor"}]
+        report = with_value(report_from_truth(TRUTH), "audio.key_timeline", {"segments": [
+            {"startSeconds": 4, "endSeconds": 8, "candidates": [{"tonic": "F", "mode": "major"}]},
+            {"startSeconds": 0, "endSeconds": 4, "candidates": [{"tonic": "D", "mode": "minor"}]}]})
+        self.assertEqual(scores(evaluate.evaluate(report, {"keys": keys}))["key agreement"], 1.0)
+
+    def test_misaligned_chord_segments_are_scored_by_time(self):
+        truth = {"chords": [{"startSeconds": 0, "endSeconds": 3, "label": "D:sus2"}]}
+        estimate = {"basis": "beats", "segments": [{"startSeconds": 0, "endSeconds": 1, "chord": "D:sus2"},
+                                                   {"startSeconds": 1, "endSeconds": 3, "chord": "F:maj"}]}
+        metrics = scores(evaluate.evaluate(single("audio.chord_timeline", estimate), truth))
+        self.assertAlmostEqual(metrics["chord label overlap"], 1 / 3)
+        self.assertAlmostEqual(metrics["chord root overlap"], 1 / 3)
+
+    def test_unresolved_per_unit_times_are_not_reported_never_a_silent_fallback(self):
+        truth = {"chords": [{"startSeconds": 0, "endSeconds": 3, "label": "D:sus2"}], "firstChord": "D:sus2"}
+        estimate = {"basis": "beats", "perUnit": ["X:maj"] * 3,
+                    "segments": [{"startSeconds": 0, "endSeconds": 3, "chord": "D:sus2"}]}
+        metrics = evaluate.evaluate(single("audio.chord_timeline", estimate), truth)
+        self.assertTrue(metrics)
+        for metric in metrics:
+            self.assertIsNone(metric.score, metric)
+            self.assertIn("not reported", metric.detail)
+            self.assertIn("perUnit times unresolved", metric.detail)
+
+    def test_chord_detail_reports_a_truncation_diagnostic(self):
+        truth = {"chords": [{"startSeconds": 0, "endSeconds": 4, "label": "D:sus2"}]}
+        estimate = {"segments": [{"startSeconds": 0, "endSeconds": 2, "chord": "D:sus2"}]}
+        report = single("audio.chord_timeline", estimate, diagnostics=[truncation("audio.chord_timeline")])
+        for metric in evaluate.evaluate(report, truth):
+            self.assertIn("truncated", metric.detail)
+        for metric in evaluate.evaluate(single("audio.chord_timeline", estimate), truth):
+            self.assertNotIn("truncated", metric.detail)
+
+    def test_key_falls_back_to_the_single_estimate_when_the_timeline_has_no_usable_segment(self):
+        report = {"observations": [
+            observation("audio.key_timeline", {"segments": [{"startSeconds": 0, "endSeconds": 4}]}),
+            observation("audio.key_estimate", {"candidates": [{"tonic": "D", "mode": "minor"}]})]}
+        truth = {"keys": [{"startSeconds": 0, "endSeconds": 4, "tonic": "D", "mode": "minor"}]}
+        self.assertEqual(scores(evaluate.evaluate(report, truth))["key agreement"], 1.0)
+
+    def test_matching_is_optimal_not_greedy(self):
+        self.assertEqual(evaluate.f_measure([1.00, 1.03], [0.97, 0.99], 0.05), (1.0, 2))
+        self.assertEqual(evaluate.f_measure([1.00, 1.03], [0.97, 0.99], 0.05, evaluate.count_matches_assignment),
+                         (1.0, 2))
+
+    def test_duplicated_estimate_beats_are_not_matched_twice(self):
+        score, matched = evaluate.f_measure([1, 2, 3], [1, 1.01, 2, 2.01, 3, 3.01], 0.07)
+        self.assertEqual(matched, 3)
+        self.assertAlmostEqual(score, 2 * 3 / 9)
+
+    def test_the_sorted_matcher_agrees_with_the_assignment_matcher(self):
+        rng = random.Random(7)
+        for _ in range(200):
+            truth = [rng.uniform(0, 20) for _ in range(rng.randint(0, 12))]
+            estimate = [rng.uniform(0, 20) for _ in range(rng.randint(0, 12))]
+            window = rng.choice([0.05, 0.5, 3.0])
+            self.assertEqual(evaluate.count_matches_sorted(truth, estimate, window),
+                             evaluate.count_matches_assignment(truth, estimate, window), (truth, estimate, window))
+
+    def test_structure_boundaries_use_an_optimal_assignment(self):
+        truth = {"structure": [{"startSeconds": s, "letter": "A"} for s in (0, 10, 12)]}
+        estimate = {"segments": [{"letter": "A", "startSeconds": s, "endSeconds": s + 1} for s in (0, 8, 10.5)]}
+        metric = evaluate.evaluate(single("audio.structure", estimate), truth)[0]
+        self.assertEqual(metric.score, 1.0)
+
+    def test_a_one_segment_truth_structure_is_not_applicable(self):
+        truth = {"structure": [{"startSeconds": 0, "letter": "A"}]}
+        metric = evaluate.evaluate({"observations": []}, truth)[0]
+        self.assertIsNone(metric.score)
+        self.assertEqual(metric.detail, "n/a: one segment, no boundaries")
+        self.assertEqual(evaluate.family_mean([metric]), (0.0, 0))
+        self.assertNotIn("not reported", evaluate.render([metric], markdown=False))
+
+    def test_an_empty_estimated_structure_is_not_reported(self):
+        truth = {"structure": [{"startSeconds": 0, "letter": "A"}, {"startSeconds": 10, "letter": "B"}]}
+        metric = evaluate.evaluate(single("audio.structure", {"segments": []}), truth)[0]
+        self.assertIsNone(metric.score)
+        self.assertIn("not reported", metric.detail)
+
+    def test_the_summary_is_a_mean_of_per_family_means(self):
+        tempo = evaluate.Metric("a", 1.0, "", "tempo"), evaluate.Metric("b", 1.0, "", "tempo")
+        key = (evaluate.Metric("c", 0.0, "", "key"), evaluate.Metric("d", None, "not reported", "key"),
+               evaluate.Metric("e", 1.0, "", "key"))
+        self.assertEqual(evaluate.family_mean([*tempo, *key]), ((1.0 + 1 / 3) / 2, 2))
+        text = evaluate.render([*tempo, *key], markdown=False)
+        self.assertIn("mean of 2 families", text)
+        self.assertIn("mean of 2 families", evaluate.render([*tempo, *key], markdown=True))
+
+    def test_evaluate_stamps_every_metric_with_a_family(self):
+        metrics = evaluate.evaluate(report_from_truth(TRUTH), TRUTH)
+        self.assertEqual({m.family for m in metrics},
+                         {"tempo", "beats", "meter", "key", "chords", "melody", "structure"})
+
+    def test_an_invalid_chord_root_or_quality_raises_with_the_label(self):
+        with self.assertRaisesRegex(ValueError, "H:maj"):
+            evaluate.parse_chord("H:maj")
+        with self.assertRaisesRegex(ValueError, "C:wobble"):
+            evaluate.parse_chord("C:wobble")
+        with self.assertRaisesRegex(ValueError, "C:wobble"):
+            evaluate.chord_family("C:wobble")
+
+    def test_chord_families_are_documented_and_consistent(self):
+        expected = {"maj": "major", "maj7": "major", "7": "major", "6": "major", "min": "minor", "min7": "minor",
+                    "dim": "minor", "dim7": "minor", "hdim7": "minor", "sus2": "other", "sus4": "other",
+                    "aug": "other"}
+        for quality, family in expected.items():
+            self.assertEqual(evaluate.chord_family(f"C:{quality}"), family, quality)
+        self.assertEqual(evaluate.chord_family("C"), "major")
+        self.assertEqual(evaluate.chord_family("N"), "none")
 
 
 def build_midi(path: Path, tracks: dict[str, list[tuple[float, float, int]]], *, bpm: float = 120,
@@ -386,6 +543,73 @@ class MidiTruthTests(unittest.TestCase):
                 "segments": [{"startSeconds": 0, "endSeconds": 2, "chord": "D:sus2"}]})]}, truth)
             self.assertEqual(scores(metrics)["chord label overlap"], 1.0)
 
+    def derive_quietly(self, tracks, **options):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            truth = self.derive(tracks, **options)
+        return truth, stderr.getvalue()
+
+    def test_unterminated_notes_close_at_the_tracks_final_tick_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hanging.mid"
+            midi = mido.MidiFile(type=1, ticks_per_beat=480)
+            conductor = mido.MidiTrack([mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(120)),
+                                        mido.MetaMessage("time_signature", numerator=4, denominator=4)])
+            pad = mido.MidiTrack([mido.MetaMessage("track_name", name="Pad")])
+            pad += [mido.Message("note_on", note=n, velocity=90, time=0) for n in (62, 64, 69)]
+            pad.append(mido.MetaMessage("end_of_track", time=4 * 480))
+            bass = mido.MidiTrack([mido.MetaMessage("track_name", name="Bass"),
+                                   mido.Message("note_on", note=38, velocity=90, time=0),
+                                   mido.Message("note_off", note=38, time=4 * 480)])
+            midi.tracks += [conductor, pad, bass]
+            midi.save(path)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                truth = midi_truth.derive_truth(path, chord_tracks=["Pad"], bass_track="Bass")
+        self.assertEqual([(c["label"], c["endSeconds"]) for c in truth["chords"]], [("D:sus2", 2.0)])
+        self.assertIn("3 unterminated", stderr.getvalue())
+
+    def test_the_duration_clips_chords_and_melody_to_the_audio(self):
+        tracks = {"Pad": chord_notes([62, 64, 69], 0, 16), "Bass": [(0, 16, 38)], "Lead": [(0, 2, 74), (5, 4, 76)]}
+        truth, _ = self.derive_quietly(tracks, melody="Lead", duration=3.0)
+        self.assertEqual(truth["chords"][-1]["endSeconds"], 3.0)
+        self.assertEqual(truth["melody"], [{"startSeconds": 0.0, "endSeconds": 1.0, "midi": 74},
+                                           {"startSeconds": 2.5, "endSeconds": 3.0, "midi": 76}])
+        truth, _ = self.derive_quietly(tracks, melody="Lead", duration=4.0, offset=1.0)
+        self.assertEqual(truth["chords"], [{"startSeconds": 1.0, "endSeconds": 4.0, "label": "D:sus2"}])
+        self.assertEqual(truth["melody"], [{"startSeconds": 1.0, "endSeconds": 2.0, "midi": 74},
+                                           {"startSeconds": 3.5, "endSeconds": 4.0, "midi": 76}])
+        self.assertTrue(all(t < 4.0 for t in truth["beats"] + truth["downbeats"]))
+
+    def test_times_below_zero_after_the_offset_are_dropped_with_a_warning(self):
+        tracks = {"Pad": chord_notes([62, 64, 69], 0, 8) + chord_notes([65, 69, 72], 8, 8),
+                  "Bass": [(0, 8, 38), (8, 8, 41)], "Lead": [(0, 1, 74), (4, 1, 76)]}
+        truth, stderr = self.derive_quietly(tracks, melody="Lead", offset=-2.0)
+        self.assertEqual(truth["beats"][0], 0.0)
+        self.assertEqual(truth["downbeats"][0], 0.0)
+        self.assertEqual(truth["chords"][0], {"startSeconds": 0.0, "endSeconds": 2.0, "label": "D:sus2"})
+        self.assertEqual(truth["melody"], [{"startSeconds": 0.0, "endSeconds": 0.5, "midi": 76}])
+        self.assertTrue(all(t >= 0 for t in truth["beats"] + truth["downbeats"]))
+        self.assertIn("before 0", stderr)
+
+    def test_a_positive_offset_does_not_warn(self):
+        _, stderr = self.derive_quietly({"Pad": chord_notes([62, 64, 69], 0), "Bass": [(0, 4, 38)]}, offset=1.0)
+        self.assertEqual(stderr, "")
+
+    def test_help_says_which_way_the_offset_shifts_and_warns_about_compound_meters(self):
+        text = " ".join(midi_truth.build_parser().format_help().split())
+        self.assertIn("audio time = MIDI time + offset", text)
+        self.assertIn("later", text)
+        self.assertIn("quarter note", text)
+        self.assertIn("6/8", text)
+        self.assertIn("quantized", text)
+
+    def test_a_note_starting_inside_a_beat_counts_for_that_beat(self):
+        late = [(0.9, 0.05, 62), (0.9, 0.05, 64), (0.9, 0.05, 69)]
+        truth = self.derive({"Pad": late, "Bass": [(0, 4, 38)]})
+        self.assertEqual([(c["label"], c["startSeconds"], c["endSeconds"]) for c in truth["chords"]],
+                         [("D:sus2", 0.0, 0.5), ("N", 0.5, 2.0)])
+
 
 class BenchmarkTests(unittest.TestCase):
     def test_measure_reports_wall_time_and_the_childs_own_peak_rss(self):
@@ -422,6 +646,45 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("time", benchmark.verdict(case, slow))
         failed = benchmark.Measurement(returncode=1, seconds=1, peak_mb=1)
         self.assertIn("exit", benchmark.verdict(case, failed))
+
+    def test_a_child_that_outlives_the_timeout_is_killed_and_reported_failed(self):
+        started = time.perf_counter()
+        result = benchmark.measure([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5)
+        self.assertLess(time.perf_counter() - started, 20)
+        self.assertTrue(result.timed_out)
+        self.assertNotEqual(result.returncode, 0)
+        case = benchmark.CASES[0]
+        self.assertIn("timed out", benchmark.verdict(case, result))
+
+    def test_an_interrupt_kills_the_child_before_propagating(self):
+        real_sleep = time.sleep
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "pid"
+            code = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+
+            def interrupt(seconds):
+                while not (marker.exists() and marker.read_text()):
+                    real_sleep(0.01)
+                raise KeyboardInterrupt
+
+            with mock.patch.object(benchmark.time, "sleep", side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    benchmark.measure([sys.executable, "-c", code, str(marker)], timeout=60)
+            pid = int(marker.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_the_stereo_case_has_decorrelated_channels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stereo.wav"
+            benchmark.synthesize(path, seconds=6.0, rate=8000, channels=2)
+            data, _ = sf.read(str(path))
+        self.assertLess(abs(numpy.corrcoef(data[:, 0], data[:, 1])[0, 1]), 0.5)
+        self.assertGreater(numpy.std(data[:, 0]), 0.01)
+
+    def test_the_timeout_flag_defaults_to_ten_minutes(self):
+        self.assertEqual(benchmark.build_parser().parse_args([]).timeout, 600.0)
+        self.assertEqual(benchmark.build_parser().parse_args(["--timeout", "5"]).timeout, 5.0)
 
 
 if __name__ == "__main__":
