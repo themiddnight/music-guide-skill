@@ -2,8 +2,8 @@
 
 | Flag | Accepted content | Bound | Evidence |
 | --- | --- | --- | --- |
-| `--mixdown` | Optional WAV PCM or IEEE float | 4 GiB | Duration, channels, sample rate, sample peak dBFS, RMS dBFS, full-scale sample count |
-| `--stem` | Optional WAV PCM or IEEE float | 4 GiB each | Same measurements, independent source scope |
+| `--mixdown` | Optional audio that libsndfile decodes: WAV, RF64, W64, AIFF, FLAC, CAF, OGG Vorbis/Opus, MP3 | 4 GiB | Format, duration, channels, sample rate, sample peak, RMS, crest factor, full-scale sample count, integrated/momentary/short-term loudness, LRA, true peak, short-term loudness timeline, band energy, spectral centroid, stereo correlation and side-to-mid ratio, pitch-class profile, inferred tempo and key candidates |
+| `--stem` | Same as `--mixdown` | 4 GiB each | Same measurements, independent source scope |
 | `--midi` | SMF 0/1 with ticks per quarter note | 32 MiB each | Tempo and meter maps, static tempo/meter for constant files, track names, per-track note summaries; paired notes with `--detail full` |
 | `--solna` | JSON formatVersion <= 12 with validated inspected fields | 8 MiB each | Stored BPM, meter ID, loop scale IDs and chords |
 | `--dawproject` | ZIP with one stored or deflated project.xml and an optional metadata.xml | 64 MiB archive, 8 MiB XML, 256 entries | Project version, application, metadata, transport tempo/meter, tempo and meter automation, tracks with plugins, clip counts, notes, markers and media basenames |
@@ -129,3 +129,11 @@ These three formats are undocumented, so each adapter records how far it was che
 **Sources.** W3C MusicXML 4.0 reference (https://www.w3.org/2021/06/musicxml40/), MuseScore 3.6 reader sources (`libmscore/measure.cpp`, `chordrest.cpp`, `note.cpp`, `tempotext.cpp`), pyaaf2 (https://github.com/markreidvfx/pyaaf2, MIT) and the AAF object specification, DAWproject `Project.xsd`, `MetaData.xsd` and the Java `Timeline` and `Clip` sources (https://github.com/bitwig/dawproject), and ptformat (https://github.com/zamaudio/ptformat) for the Pro Tools header.
 
 **Signatures.** Pro Tools `.ptx` and `.ptf` must start with byte `0x03` or hold the 16-character bit string `0010111100101011` at offset 1 of the first 256 bytes, which is the check ptformat applies for Pro Tools 5 to 12. Pro Tools session version is not extracted, because reading it needs the session de-obfuscated and no real session was available to test that. No source confirms a `.bwproject` or `.reason` header (the published Reason signature belongs to the older `.rns`), so those two accept any content.
+
+## Audio measurements
+
+The audio adapter opens any file libsndfile decodes and streams it in blocks, so memory stays flat for long files. Sample peak, RMS, crest factor and the full-scale sample count are exact for the decoded samples. Loudness follows ITU-R BS.1770-4 and EBU R128: K-weighting derived for the file's sample rate, 400 ms momentary and 3 s short-term windows, gated integrated loudness and EBU Tech 3342 loudness range. Every channel is weighted 1.0, so surround files carry a `channel_weighting` diagnostic. True peak uses 4x polyphase oversampling (2x above 96 kHz) and can under-read by up to about 0.3 dB. Files shorter than 400 ms, silence, or rates below 8 kHz give null loudness with `loudness_unmeasurable`.
+
+MP3, Vorbis and Opus are decoded by libsndfile. Their signal measurements describe the decoded audio, carry confidence `medium` and a `lossy_decode` diagnostic, because decoding can raise sample peaks and codecs add delay and padding.
+
+Band energy, spectral centroid, stereo correlation and side-to-mid ratio are whole-file averages. The pitch-class profile is measured energy per pitch class. `audio.tempo_estimate` and `audio.key_estimate` are `inferred` with confidence `low`: tempo candidates may be half or double the felt tempo, and the key estimate correlates with major and minor profiles only, so modal or pentatonic music (for example Hirajoshi) can be mislabelled. Use the pitch-class profile to reason about such scales. Inferred estimates never raise automatic conflicts.

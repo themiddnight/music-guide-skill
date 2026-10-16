@@ -9,4 +9,4 @@
 | Compare | Run the CLI for every mixdown. Compare compatible observations and call out changed render conditions. Avoid treating level differences as quality differences. |
 | Create | Offer playable/writable proposals with choices and rationale. Say what is proposed rather than extracted. |
 
-For any intent, a specific-track claim needs its source. If no mixdown is available, offer concept-level help and request a WAV only when the user wants this track assessed. A source conflict remains unresolved until the user or a direct verification resolves it.
+For any intent, a specific-track claim needs its source. If no mixdown is available, offer concept-level help and request an audio export only when the user wants this track's sound assessed; project files alone support only stored-intent claims. A source conflict remains unresolved until the user or a direct verification resolves it.

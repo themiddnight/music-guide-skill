@@ -86,9 +86,10 @@ def _inventory(path: Path, fmt: ProjectFormat | None, source: Source, evidence: 
 def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations: Path | None,
           detail: Detail = "summary") -> Evidence:
     evidence = Evidence(limitations=[
-        "WAV sample peak is not true peak; RMS is not LUFS.",
+        "Loudness and true peak follow ITU-R BS.1770-4 with every channel weighted 1.0; no surround channel map is read.",
+        "Tempo and key estimates from audio are inferred, low-confidence candidates, not facts.",
         "MIDI and project files describe stored intent, not rendered sound.",
-        "No semantic listening, key estimation, genre classification or artwork generation is performed.",
+        "No semantic listening, instrument recognition, genre classification or artwork generation is performed.",
     ])
     if mixdown is None:
         evidence.diagnostics.append(Diagnostic("no_mixdown", "info",
