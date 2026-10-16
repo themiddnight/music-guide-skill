@@ -507,5 +507,81 @@ class XmlShapeTest(CliCase):
         self.assert_optional_error(self.evidence("--project", nested))
 
 
+class PlausibleValueTest(CliCase):
+    def optional_error(self, path: Path, flag="--project") -> str:
+        data = self.evidence(flag, path)
+        self.assert_optional_error(data)
+        return next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error")
+
+    def values(self, data, prop):
+        return [item["value"] for item in data["observations"] if item["property"] == prop]
+
+    def test_project_facts_reject_absurd_tempo_and_meter(self):
+        from music_guide.model import Evidence
+        from music_guide.project import ProjectFacts
+        facts = ProjectFacts(Evidence(), "s1", "test", "summary")
+        facts.tempo(1000, "loc")
+        facts.tempo(0.5, "loc")
+        for bpm in (1000.001, 999999, 1e300, 0, -1, float("nan")):
+            with self.subTest(bpm=bpm), self.assertRaises(ValueError):
+                facts.tempo(bpm, "loc")
+        with self.assertRaises(ValueError):
+            facts.tempo_map([{"beat": 0, "bpm": 120}, {"beat": 4, "bpm": 5000}], "loc")
+        for numerator, denominator in ((4, 4), (99, 64), (1, 1), (7, 8), (6, 16)):
+            facts.meter(numerator, denominator, "loc")
+        for numerator, denominator in ((100, 4), (0, 4), (4, 0), (4, 3), (4, 128), (4, 6), (10 ** 300, 4), (4, True)):
+            with self.subTest(meter=(numerator, denominator)), self.assertRaises(ValueError):
+                facts.meter(numerator, denominator, "loc")
+
+    def test_plausibility_predicates_accept_the_same_values(self):
+        from music_guide.project import plausible_meter, plausible_tempo
+        self.assertTrue(plausible_tempo(120) and plausible_tempo(1000.0))
+        self.assertFalse(any(plausible_tempo(value) for value in (0, -3, 1001, float("inf"), float("nan"), True, "120")))
+        self.assertTrue(plausible_meter(3, 4) and plausible_meter(3.0, 8.0))
+        self.assertFalse(any(plausible_meter(*pair) for pair in ((0, 4), (100, 4), (3, 5), (3, 128), (2.5, 4), (True, 4), (3, None))))
+
+    def test_dawproject_with_absurd_transport_is_a_source_error(self):
+        def project(transport: str) -> Path:
+            path = self.dir / "t.dawproject"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("project.xml", f'<Project version="1"><Transport>{transport}</Transport></Project>')
+            return path
+        self.assertIn("BPM limit", self.optional_error(project('<Tempo value="5000" unit="bpm"/>'), "--dawproject"))
+        self.assertIn("meter", self.optional_error(project('<TimeSignature numerator="200" denominator="4"/>'), "--dawproject"))
+        data = self.evidence("--dawproject", project('<Tempo value="1000" unit="bpm"/>'))
+        self.assertEqual(self.values(data, "tempo"), [1000.0])
+
+    def test_reaper_with_absurd_tempo_is_a_source_error(self):
+        path = self.write("a.rpp", '<REAPER_PROJECT 0.1 "6.0/macOS" 1\n  TEMPO 999999 4 4\n>\n')
+        self.assertIn("BPM limit", self.optional_error(path))
+
+    def test_flp_with_implausible_meter_keeps_the_rest_of_the_project(self):
+        def event(event_id: int, payload: bytes) -> bytes:
+            return bytes([event_id]) + payload
+        events = [bytes([199, 12]) + b"20.8.3.2304\0", event(156, struct.pack("<I", 128000)), event(17, bytes([200])),
+                  event(18, bytes([4]))]
+        body = b"".join(events)
+        path = self.write("a.flp", b"FLhd" + struct.pack("<IhHH", 6, 0, 2, 96) + b"FLdt" + struct.pack("<I", len(body)) + body)
+        data = self.evidence("--project", path)
+        self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
+        self.assertEqual(self.values(data, "tempo"), [128.0])
+        self.assertEqual(self.values(data, "meter"), [])
+        self.assertEqual(self.values(data, "flstudio.time_signature"), [{"numerator": 200, "beat": 4}])
+
+    def test_studio_one_skips_implausible_tempo_and_meter_segments(self):
+        song = ('<?xml version="1.0" encoding="UTF-8"?><Song xmlns:x="urn:presonus"><Attributes x:id="Root">'
+                '<Attributes x:id="timeContext" sampleRate="44100">'
+                '<TempoMap x:id="tempoMap"><TempoMapSegment curveType="0" start="0" tempo="0.0001"/></TempoMap>'
+                '<TimeSignatureMap x:id="timeSignatureMap"><TimeSignatureMapSegment start="0" numerator="3" denominator="5"/>'
+                '</TimeSignatureMap></Attributes></Attributes></Song>')
+        path = self.dir / "a.song"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("Song/song.xml", song)
+            archive.writestr("metainfo.xml", "<MetaInformation/>")
+        data = self.evidence("--project", path)
+        self.assertEqual(data["sources"][-1]["status"], "ok", data["diagnostics"])
+        self.assertEqual(self.values(data, "tempo") + self.values(data, "meter"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence, get_args
@@ -26,9 +27,42 @@ def _list_limit(property: str) -> int:
     return MAX_NOTE_LISTING if property == "project.note" else MAX_LISTED
 
 
+MAX_TEMPO_BPM = 1000.0
+MAX_METER_NUMERATOR = 99
+MAX_METER_DENOMINATOR = 64
+
+
+def _whole_value(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return int(value) if isinstance(value, float) and value.is_integer() else None
+
+
+def plausible_tempo(bpm: object) -> bool:
+    """True for a finite tempo in (0, 1000] BPM. Adapters use it to skip an optional value they cannot trust."""
+    return (isinstance(bpm, (int, float)) and not isinstance(bpm, bool) and math.isfinite(bpm)
+            and 0 < bpm <= MAX_TEMPO_BPM)
+
+
+def plausible_meter(numerator: object, denominator: object) -> bool:
+    """True for a numerator in 1..99 over a power-of-two denominator up to 64."""
+    top, bottom = _whole_value(numerator), _whole_value(denominator)
+    return (top is not None and bottom is not None and 1 <= top <= MAX_METER_NUMERATOR
+            and 1 <= bottom <= MAX_METER_DENOMINATOR and bottom & (bottom - 1) == 0)
+
+
 def _count(value: int, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _tempo_value(bpm: float, label: str) -> float:
+    value = _finite_number(bpm, label, positive=True)
+    if value > MAX_TEMPO_BPM:
+        raise ValueError(f"{label} {value:g} is above the {MAX_TEMPO_BPM:g} BPM limit")
     return value
 
 
@@ -65,19 +99,21 @@ class ProjectFacts:
 
     def tempo(self, bpm: float, locator: str,
               reason: str = "Stored project tempo; tempo automation is not reconstructed.") -> None:
-        self._add("tempo", _finite_number(bpm, "tempo", positive=True), "BPM", locator, reason, confidence="medium")
+        self._add("tempo", _tempo_value(bpm, "tempo"), "BPM", locator, reason, confidence="medium")
 
     def meter(self, numerator: int, denominator: int, locator: str,
               reason: str = "Stored project meter; meter changes are not reconstructed.",
               confidence: Confidence = "medium") -> None:
-        if _count(numerator, "meter numerator") == 0 or _count(denominator, "meter denominator") == 0:
-            raise ValueError("meter numerator and denominator must be positive")
+        _count(numerator, "meter numerator"), _count(denominator, "meter denominator")
+        if not plausible_meter(numerator, denominator):
+            raise ValueError(f"meter {numerator}/{denominator} is outside 1-{MAX_METER_NUMERATOR} over a power of two "
+                             f"up to {MAX_METER_DENOMINATOR}")
         self._add("meter", f"{numerator}/{denominator}", "signature", locator, reason, confidence=confidence)
 
     def tempo_map(self, points: Sequence[Mapping[str, float]], locator: str) -> None:
         """Each point is {"beat": position in quarter notes, "bpm": tempo from that beat}."""
         value = [{"beat": _finite_number(point["beat"], "tempo map beat"),
-                  "bpm": _finite_number(point["bpm"], "tempo map bpm", positive=True)} for point in points]
+                  "bpm": _tempo_value(point["bpm"], "tempo map bpm")} for point in points]
         self._add("project.tempo_map", value, "BPM", locator,
                   "Stored tempo changes in beat order; interpolation between points is not modeled.",
                   time_domain="project_beats")

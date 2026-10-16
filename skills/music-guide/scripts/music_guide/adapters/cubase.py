@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..model import Detail, Diagnostic, Evidence
-from ..project import ProjectFacts, TrackKind
+from ..project import ProjectFacts, TrackKind, plausible_meter, plausible_tempo
 from .common import MAX_ZIP_BYTES, _read_bounded
 from .graded import GradedFacts
 
@@ -358,12 +358,12 @@ def _emit_metadata(data: bytes, roots: list[tuple[str, str, Chunk]], facts: Proj
     if isinstance(rate, (int, float)) and rate > 0:
         medium.sample_rate(int(rate) if float(rate).is_integer() else rate, "Metadata AudioSampleRate")
     tempo = by_id.get("MusicalTempo")
-    if isinstance(tempo, (int, float)) and tempo > 0:
+    if plausible_tempo(tempo):
         low.tempo(round(float(tempo), 4), "Metadata MusicalTempo")
     signature = by_id.get("MusicalSignature")
     if isinstance(signature, dict):
         numerator, denominator = signature.get("Numerator"), signature.get("Denominator")
-        if isinstance(numerator, int) and isinstance(denominator, int) and numerator > 0 and denominator > 0:
+        if isinstance(numerator, int) and isinstance(denominator, int) and plausible_meter(numerator, denominator):
             low.meter(numerator, denominator, "Metadata MusicalSignature")
 
 

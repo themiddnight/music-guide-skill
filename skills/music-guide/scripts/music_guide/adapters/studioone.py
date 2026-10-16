@@ -15,7 +15,7 @@ from pathlib import Path
 from xml.etree.ElementTree import Element
 
 from ..model import Detail, Diagnostic, Evidence
-from ..project import ProjectFacts, TrackKind
+from ..project import ProjectFacts, TrackKind, plausible_meter, plausible_tempo
 from .common import MAX_XML_BYTES, MAX_ZIP_BYTES, _finite_number, _local, _parse_xml, _read_zip_member
 
 METHOD = "studioone-xml"
@@ -223,7 +223,7 @@ def _emit_timeline(facts: ProjectFacts, evidence: Evidence, source_id: str, cont
     tempos = []
     for segment in _children(_by_xid(context, "tempoMap"), "TempoMapSegment"):
         seconds_per_beat, start = _number(segment, "tempo"), _number(segment, "start", 0.0)
-        if seconds_per_beat and seconds_per_beat > 0:
+        if seconds_per_beat and seconds_per_beat > 0 and plausible_tempo(60 / seconds_per_beat):
             tempos.append((start, round(60 / seconds_per_beat, 6), _number(segment, "curveType", 0.0) != 0))
     tempos.sort()
     if len(tempos) == 1 and tempos[0][0] == 0:
@@ -238,7 +238,7 @@ def _emit_timeline(facts: ProjectFacts, evidence: Evidence, source_id: str, cont
     meters = []
     for segment in _children(_by_xid(context, "timeSignatureMap"), "TimeSignatureMapSegment"):
         numerator, denominator = _number(segment, "numerator"), _number(segment, "denominator")
-        if numerator and denominator and numerator.is_integer() and denominator.is_integer():
+        if numerator and denominator and plausible_meter(numerator, denominator):
             meters.append((_number(segment, "start", 0.0), int(numerator), int(denominator)))
     meters.sort()
     if len(meters) == 1 and meters[0][0] == 0:

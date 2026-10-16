@@ -6,7 +6,7 @@ from xml.etree.ElementTree import Element
 
 from ..model import Confidence, Detail, Diagnostic, Evidence
 from ..notes import PITCH_CLASSES, Note, summarize_notes
-from ..project import ProjectFacts, TrackKind
+from ..project import ProjectFacts, TrackKind, plausible_meter
 from .common import MAX_GZIP_BYTES, MAX_ZIP_BYTES, _finite_number, _gunzip_bounded, _local, _parse_xml, _read_bounded
 from .listing import capped
 
@@ -143,7 +143,7 @@ class _Transport:
         found = []
         for entry in self.master.findall("TimeSignatures/RemoteableTimeSignature"):
             numerator, denominator = _child_number(entry, "Numerator"), _child_number(entry, "Denominator")
-            if numerator is None or denominator is None or numerator < 1 or denominator < 1:
+            if numerator is None or denominator is None or not plausible_meter(numerator, denominator):
                 continue
             found.append((max(_child_number(entry, "Time") or 0.0, 0.0), (int(numerator), int(denominator))))
         return sorted(found)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..model import Detail, Diagnostic, Evidence
 from ..notes import Note, summarize_notes
-from ..project import ProjectFacts, TrackKind
+from ..project import ProjectFacts, TrackKind, plausible_meter
 from .common import MAX_ZIP_BYTES, _read_bounded
 from .graded import GradedFacts
 
@@ -318,7 +318,7 @@ def _emit(evidence: Evidence, source_id: str, detail: Detail, file_format: int, 
         numerator, beat = numbers[ID_TIME_SIG_NUMERATOR], numbers[ID_TIME_SIG_BEAT]
         add("flstudio.time_signature", {"numerator": numerator, "beat": beat}, "signature", "project",
             "events 17 and 18", METER_CAVEAT)
-        if numerator >= 1 and beat in METER_DENOMINATORS:
+        if numerator >= 1 and beat in METER_DENOMINATORS and plausible_meter(numerator, beat):
             low.meter(numerator, beat, "events 17 and 18")
     for event_id, property in PROJECT_STRINGS.items():
         if strings.get(event_id):
