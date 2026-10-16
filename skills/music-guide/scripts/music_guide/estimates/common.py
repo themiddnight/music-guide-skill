@@ -8,6 +8,8 @@ from ..model import Confidence, Detail, Fact, check_finite, native
 
 ESTIMATE_PREFIX = "Estimate, not a fact: "
 FULL_LIMIT = 50_000
+TEMPORAL_PROPERTIES = frozenset({"audio.key_timeline", "audio.beat_grid", "audio.meter_estimate",
+                                "audio.chord_timeline", "audio.structure", "audio.energy_timeline", "audio.melody"})
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,8 @@ class ReportContext:
               provenance: Literal["measured", "inferred"]) -> Fact:
         value = native(value)
         check_finite(property, value)
-        return Fact(property, value, unit, method, reason, confidence, provenance)
+        return Fact(property, value, unit, method, reason, confidence, provenance,
+                    "seconds" if property in TEMPORAL_PROPERTIES else "static")
 
 
 class Result(Protocol):

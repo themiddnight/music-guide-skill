@@ -59,6 +59,7 @@ class FeatureStore:
     timbre: np.ndarray = field(default_factory=lambda: _empty(12))
     brightness: np.ndarray = field(default_factory=lambda: _empty(1).reshape(-1))
     loudness: np.ndarray | None = None
+    source_rate: int | None = None
 
     @cached_property
     def flux(self) -> np.ndarray:
@@ -164,7 +165,7 @@ class FeatureRecorder:
         return FeatureStore(treble=self.treble.freeze(), bass=self.bass.freeze(), treble_narrow=self.treble_narrow.freeze(),
                             activations=self.activations.freeze(), tuning_cents=self.harmonic.tuning_cents,
                             timbre=self.timbre.freeze(), brightness=self.brightness.freeze().reshape(-1),
-                            loudness=loudness, onset=self.onset.freeze(), onset_rate=self.decimated_rate / ONSET_HOP,
+                            loudness=loudness, source_rate=self.rate, onset=self.onset.freeze(), onset_rate=self.decimated_rate / ONSET_HOP,
                             pcp=self.pcp.freeze(), seconds=self.frames / self.rate, channels=self.channels,
                             folded=self.fold is not None)
 

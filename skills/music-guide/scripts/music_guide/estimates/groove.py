@@ -48,14 +48,16 @@ class Rhythm:
         return ctx.estimate("audio.rhythm", value, "rhythm", self.method)
 
 
-def _onset_times(store: FeatureStore) -> np.ndarray:
+def onset_times(store: FeatureStore) -> np.ndarray:
     flux = store.flux
     if not len(flux) or not np.any(flux):
         return np.empty(0)
     prominence = 0.05 * float(np.percentile(flux, 90))
     peaks, _ = signal.find_peaks(flux, prominence=max(prominence, 1e-7),
                                  distance=max(1, round(store.onset_rate * 0.08)))
-    return peaks / store.onset_rate
+    if len(flux) > 1 and flux[0] > flux[1] and flux[0] > max(prominence, 1e-7):
+        peaks = np.r_[0, peaks]
+    return peaks[peaks / store.onset_rate < store.seconds] / store.onset_rate
 
 
 def _pulse_clarity(store: FeatureStore, grid: BeatGrid) -> float:
@@ -76,9 +78,10 @@ def groove(store: FeatureStore, beats: BeatGrid, tempo: TempoCandidates, *,
            meter: Outcome | MeterEstimate) -> Rhythm | Skip:
     """Compute onset measures only when a beat grid exists; meter-dependent values may be null."""
     del tempo  # The BeatGrid already encodes the selected tempo candidate.
-    times = _onset_times(store)
+    times = onset_times(store)
     if len(times) < 4:
         return Skip(f"only {len(times)} distinct onset peaks; rhythm needs at least four.")
+    density = len(times) / store.seconds
     beat_times = beats.times
     end = beat_times[-1] + np.median(np.diff(beat_times))
     times = times[(times >= beat_times[0] - 0.03) & (times < end)]
@@ -95,7 +98,6 @@ def groove(store: FeatureStore, beats: BeatGrid, tempo: TempoCandidates, *,
     quarter_positions = positions * pulse_in_quarters
     deviations = np.abs(quarter_positions * 4 - np.round(quarter_positions * 4)) / 4
     microtiming = float(np.median(deviations) * beat_period / pulse_in_quarters * 1000)
-    density = len(times) / store.seconds
     per_bar = sync = None
     if isinstance(meter, MeterEstimate):
         signature = meter.candidates[0][0]
@@ -105,7 +107,6 @@ def groove(store: FeatureStore, beats: BeatGrid, tempo: TempoCandidates, *,
         per_bar = rhythm.onset_density(bar_positions.tolist(), top * 4 / bottom)
         sync = rhythm.syncopation(bar_positions.tolist(), metric)
     clarity = _pulse_clarity(store, beats)
-    # Around two to eight attacks per second keeps both beat and subdivisions present.
     density_fit = float(np.clip(density / 2, 0, 1) * np.clip(10 / max(density, 1e-9), 0, 1))
     timing_regularity = float(np.clip(1 - microtiming / (beat_period / pulse_in_quarters * 125), 0, 1))
     danceability = float(np.clip(0.35 * clarity + 0.30 * beats.stability

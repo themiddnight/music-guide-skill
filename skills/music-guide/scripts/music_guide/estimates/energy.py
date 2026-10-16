@@ -4,10 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
 
 from .common import FULL_LIMIT, Method, Report, ReportContext, Skip
-from .store import FeatureStore, bin_sum
+from .store import FeatureStore
+from .groove import onset_times
 
 SUMMARY_SEGMENTS = 64
 MOOD_FORMULA = ("arousal = mean of available loudness (-30..-8 LUFS), onset rate (0..8/s), "
@@ -51,21 +51,26 @@ def _lufs(energy: float) -> float | None:
     return round(float(-0.691 + 10 * np.log10(energy)), 3) if energy > 0 else None
 
 
+def _weighted_means(store, values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Integrate row descriptors over their actual duration, including a partial last row."""
+    if not len(values):
+        return np.zeros(len(edges) - 1)
+    row_edges = np.arange(len(values) + 1) / store.row_rate
+    if store.source_rate is not None:
+        row_edges = np.floor(np.arange(len(values) + 1) * store.source_rate / store.row_rate) / store.source_rate
+    row_edges = np.minimum(row_edges, store.seconds)
+    integral = np.r_[0., np.cumsum(np.asarray(values) * np.diff(row_edges))]
+    starts = np.clip(edges, row_edges[0], row_edges[-1])
+    totals = np.diff(np.interp(starts, row_edges, integral))
+    durations = np.diff(starts)
+    return np.divide(totals, durations, out=np.zeros_like(totals), where=durations > 0)
+
+
 def _segments(store, edges: np.ndarray, peaks: np.ndarray, loudness, brightness) -> tuple[dict, ...]:
     durations = np.diff(edges)
     values = []
-    if loudness is not None:
-        total = bin_sum(loudness, store.row_rate, edges)
-        count = bin_sum(np.ones(len(loudness)), store.row_rate, edges)
-        loud = np.divide(total, count, out=np.zeros_like(total), where=count > 0)
-    else:
-        loud = None
-    if brightness is not None:
-        total = bin_sum(brightness, store.row_rate, edges)
-        count = bin_sum(np.ones(len(brightness)), store.row_rate, edges)
-        bright = np.divide(total, count, out=np.zeros_like(total), where=count > 0)
-    else:
-        bright = None
+    loud = _weighted_means(store, loudness, edges) if loudness is not None else None
+    bright = _weighted_means(store, brightness, edges) if brightness is not None else None
     counts = np.diff(np.searchsorted(peaks, edges))
     for i, (start, end) in enumerate(zip(edges[:-1], edges[1:])):
         values.append({"startSeconds": round(float(start), 3), "endSeconds": round(float(end), 3),
@@ -81,13 +86,7 @@ def energy(store: FeatureStore, *, structure, beats, meter=None) -> EnergyTimeli
         return Skip("energy needs at least 2 s of non-silent audio.")
     loudness = getattr(store, "loudness", None)
     brightness = getattr(store, "brightness", None)
-    threshold = max(float(np.mean(store.flux) + 0.5 * np.std(store.flux)), 1e-12)
-    indices = signal.find_peaks(store.flux, height=threshold,
-                                distance=max(1, int(0.08 * store.onset_rate)))[0]
-    if len(store.flux) > 1 and store.flux[0] >= threshold and store.flux[0] > store.flux[1]:
-        indices = np.r_[0, indices]
-    peaks = indices / store.onset_rate
-    peaks = peaks[peaks < store.seconds]
+    peaks = onset_times(store)
     if isinstance(structure, Skip) or structure is None:
         edges = np.unique(np.r_[np.arange(0, store.seconds, max(10.0, store.seconds / SUMMARY_SEGMENTS)), store.seconds])
         segmented_by = "uniform"
@@ -104,8 +103,11 @@ def energy(store: FeatureStore, *, structure, beats, meter=None) -> EnergyTimeli
     else:
         bars = np.unique(np.r_[np.arange(0, store.seconds, 2.0), store.seconds])
         basis, detail_key = "fixed 2 s intervals because a beat grid was unavailable", "perWindow"
-    mean_loudness = _lufs(float(np.mean(loudness))) if loudness is not None and len(loudness) else None
-    mean_brightness = float(np.mean(brightness)) if brightness is not None and len(brightness) else None
+    whole = np.array([0., store.seconds])
+    mean_loudness = (_lufs(float(_weighted_means(store, loudness, whole)[0]))
+                     if loudness is not None and len(loudness) else None)
+    mean_brightness = (float(_weighted_means(store, brightness, whole)[0])
+                       if brightness is not None and len(brightness) else None)
     segments = _segments(store, edges, peaks, loudness, brightness)
     if segmented_by == "structure" and getattr(structure, "letters", None) is not None:
         segments = tuple({"letter": letter, **segment} for letter, segment in zip(structure.letters, segments))

@@ -1,7 +1,7 @@
 """Compact harmonic note salience for the shared streaming feature recorder.
 
 This is a fixed dictionary fit, not a trained transcription model. The first sixty seconds lock the tuning;
-only their compact log spectra are buffered, never their audio or full FFTs.
+only their compact magnitude spectra on a logarithmic frequency grid are buffered, never their audio or full FFTs.
 """
 from __future__ import annotations
 

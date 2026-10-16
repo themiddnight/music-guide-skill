@@ -3,7 +3,7 @@
 
     benchmark.py [--six-hour] [--detail summary|full] [--timeout SECONDS]
 
-The 4 minute stereo file always runs. The 6 hour mono file at 8 kHz takes minutes and writes about 350 MB to a
+The 4 minute stereo file always runs. The 6 hour mono file at 8 kHz takes minutes and writes about 350 MiB to a
 temporary directory, so it runs only with --six-hour. Each file is analyzed by a fresh interpreter, and the child's
 own peak resident set comes from `wait4`, so one case never inherits another's peak. That per-child peak was verified
 on macOS only, where `ru_maxrss` is in bytes. The Linux branch assumes kilobytes and has not been run.
@@ -149,7 +149,7 @@ def verdict(case: Case, result: Measurement) -> str:
     if case.max_seconds is not None and result.seconds > case.max_seconds:
         over.append(f"time {result.seconds:.1f} s over {case.max_seconds:g} s")
     if result.peak_mb > case.max_mb:
-        over.append(f"memory {result.peak_mb:.0f} MB over {case.max_mb:g} MB")
+        over.append(f"memory {result.peak_mb:.0f} MiB over {case.max_mb:g} MiB")
     return "over budget: " + ", ".join(over) if over else "within budget"
 
 
@@ -187,8 +187,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                              timeout=args.timeout)
             wav.unlink()
             budget = (f"{case.max_seconds:g} s, " if case.max_seconds is not None else "no time budget, ") \
-                + f"{case.max_mb:g} MB"
-            print(f"{case.label}: {result.seconds:.1f} s wall, {result.peak_mb:.0f} MB peak RSS, "
+                + f"{case.max_mb:g} MiB"
+            print(f"{case.label}: {result.seconds:.1f} s wall, {result.peak_mb:.0f} MiB peak RSS, "
                   f"{verdict(case, result)} (budget {budget}, detail {args.detail})")
             if result.returncode != 0:
                 print(result.stderr.strip()[-2000:], file=sys.stderr)

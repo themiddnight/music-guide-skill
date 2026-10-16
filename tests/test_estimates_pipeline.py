@@ -26,7 +26,8 @@ from music_guide.estimates.common import ReportContext  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
-LABELS = ("pitch class profile", "tempo estimate", "key estimate", "beat grid", "meter estimate", "swing estimate")
+LABELS = ("pitch class profile", "tempo estimate", "key estimate", "beat grid", "meter estimate", "swing estimate",
+          "chord timeline", "rhythm estimate", "structure estimate", "energy timeline", "mood estimate", "melody estimate")
 CHORDS = [(62, 65, 69), (65, 69, 72), (58, 62, 65), (57, 61, 64)]
 
 
@@ -104,7 +105,7 @@ class PipelineTest(unittest.TestCase):
                 self.assertAlmostEqual(grid.bpm, 120, delta=1)
                 self.assertLess(np.max(np.min(np.abs(truth[:, None] - grid.times[None, :]), axis=1)), 0.03)
 
-    def test_stems_report_tempo_beats_and_key_only(self):
+    def test_stems_report_tempo_beats_key_and_independent_melody(self):
         path = self.dir / "drums.wav"
         sf.write(path, np.stack([music(40)] * 2, axis=1), RATE, subtype="FLOAT")
         result = run_cli("--stem", path, cwd=self.dir)
@@ -112,7 +113,7 @@ class PipelineTest(unittest.TestCase):
         data = json.loads(result.stdout)
         estimated = {item["property"] for item in data["observations"] if item["provenance"] == "inferred"}
         self.assertEqual(estimated, {"audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline",
-                                     "audio.beat_grid"})
+                                     "audio.beat_grid", "audio.melody"})
         self.assertEqual([item for item in data["diagnostics"] if item["code"].startswith("estimate")], [])
 
     def test_flux_is_float64_and_read_only(self):
@@ -136,6 +137,20 @@ class PipelineTest(unittest.TestCase):
                           " ZeroDivisionError: boom", skipped)
         for kept in ("audio.integrated_loudness", "audio.tempo_estimate", "audio.key_estimate"):
             self.assertIn(kept, data["facts"])
+
+    def test_failed_chords_preserve_independent_estimates(self):
+        def broken(*_, **kwargs):
+            raise ValueError('chord fixture failure')
+        with mock.patch.dict(estimates.BACKENDS, {'builtin': estimates.Backend('custom', chords=broken)}):
+            data = self.evidence(np.stack([music(32)] * 2, axis=1))
+        self.assertEqual(len(self.messages(data, 'estimate_failed')), 1)
+        self.assertNotIn('audio.chord_timeline', data['facts'])
+        for name in ('audio.key_estimate', 'audio.rhythm', 'audio.energy_timeline', 'audio.mood_estimate', 'audio.melody'):
+            self.assertIn(name, data['facts'])
+            self.assertTrue(data['facts'][name]['method'].startswith('custom:'))
+        inputs = data['facts']['audio.mood_estimate']['value']['inputs']
+        self.assertEqual(inputs['majorShareFrom'], 'key')
+        self.assertAlmostEqual(inputs['onsetsPerSecond'], data['facts']['audio.rhythm']['value']['onsetsPerSecond'], places=2)
 
     def test_failed_report_is_isolated(self):
         def broken(*_):
@@ -162,11 +177,12 @@ class PipelineTest(unittest.TestCase):
                 self.assertIn("audio.integrated_loudness", data["facts"])
 
     def test_every_estimate_is_inferred_low_with_method_reason(self):
-        samples = np.stack([music(40)] * 2, axis=1)
+        samples = np.stack([music(60)] * 2, axis=1)
         summary, full = self.evidence(samples), self.evidence(samples, "--detail", "full", name="full.wav")
         self.assertEqual(self.messages(summary, "estimate_failed") + self.messages(full, "estimate_failed"), [])
         names = {"audio.tempo_estimate", "audio.key_estimate", "audio.key_timeline", "audio.beat_grid",
-                 "audio.meter_estimate", "audio.swing_ratio"}
+                 "audio.meter_estimate", "audio.swing_ratio", "audio.chord_timeline", "audio.chord_summary",
+                 "audio.rhythm", "audio.structure", "audio.energy_timeline", "audio.mood_estimate", "audio.melody"}
         self.assertLessEqual(names, set(summary["facts"]))
         for name in names:
             for data in (summary, full):

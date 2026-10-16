@@ -13,7 +13,8 @@ from support import run_cli
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import benchmark
 from music_guide.cli import build
-from music_guide.estimates import BACKENDS
+from music_guide.estimates import BACKENDS, render
+from music_guide.estimates.common import Method, ReportContext
 from music_guide.loudness import LoudnessMeter
 
 
@@ -27,6 +28,15 @@ class BackendSelectionTest(unittest.TestCase):
         self.assertEqual(set(BACKENDS), {'builtin'})
         result = run_cli('--help', cwd=Path.cwd())
         self.assertIn('--analysis-backend {builtin}', result.stdout)
+
+    def test_backend_method_name_reaches_facts(self):
+        class Result:
+            def report(self, ctx):
+                return ctx.estimate('audio.chord_timeline', {'segments': []}, 'chords', Method('test', 'fixture'))
+        facts, diagnostics = render([('chords', Result())], ReportContext('summary', ''), 'custom')
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(facts[0].method, 'custom:test')
+        self.assertEqual(facts[0].time_domain, 'seconds')
 
     def test_build_rejects_unknown_backend(self):
         with self.assertRaisesRegex(ValueError, 'unknown analysis backend'):

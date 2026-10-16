@@ -95,9 +95,9 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
         raise ValueError(f"unknown analysis backend: {analysis_backend}")
     evidence = Evidence(limitations=[
         "Loudness and true peak follow ITU-R BS.1770-4 with every channel weighted 1.0; no surround channel map is read.",
-        "Tempo and key estimates from audio are inferred, low-confidence candidates, not facts.",
+        "Musical estimates from audio are inferred, low-confidence candidates, not facts.",
         "MIDI and project files describe stored intent, not rendered sound.",
-        "No semantic listening, instrument recognition, genre classification or artwork generation is performed.",
+        "Mood is an untrained descriptor heuristic; no semantic listening, instrument recognition, genre classification or artwork generation is performed.",
     ])
     if mixdown is None:
         evidence.diagnostics.append(Diagnostic("no_mixdown", "info",

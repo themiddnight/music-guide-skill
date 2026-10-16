@@ -64,12 +64,13 @@ class KeyResult:
     timeline: tuple[KeySegment, ...] | None  # None below MIN_KEY_TIMELINE_SECONDS
     method: Method = KEY_METHOD
     timeline_method: Method = TIMELINE_METHOD
+    score_name: str = "correlation"
 
     def report(self, ctx: ReportContext) -> Report:
-        report = ctx.estimate("audio.key_estimate", _candidates(self.scores), "key", self.method)
+        report = ctx.estimate("audio.key_estimate", _candidates(self.scores, self.score_name), "key", self.method)
         if self.timeline is None:
             return report
-        segments = [{"startSeconds": segment.start, "endSeconds": segment.end, **_candidates(segment.scores)}
+        segments = [{"startSeconds": segment.start, "endSeconds": segment.end, **_candidates(segment.scores, self.score_name)}
                     for segment in self.timeline]
         segments, cut = ctx.cap(segments, FULL_LIMIT if ctx.full else SUMMARY_SEGMENTS, "key segments")
         value = {"cellSeconds": KEY_CELL_SECONDS, "segments": segments}
@@ -124,7 +125,7 @@ def key(store: FeatureStore) -> KeyResult | Skip:
         timeline = tuple(KeySegment(round(start * KEY_CELL_SECONDS, 1),
                                     round(store.seconds if last else end * KEY_CELL_SECONDS, 1),
                                     np.mean(scores[start:end][usable[start:end]], axis=0))
-                         for start, end, last in _viterbi_runs(scores))
+                         for start, end, last in _viterbi_runs(scores) if np.any(usable[start:end]))
     return KeyResult(np.mean(scores[usable], axis=0), timeline)
 
 
@@ -148,7 +149,7 @@ def _viterbi_runs(scores: np.ndarray) -> list[tuple[int, int, bool]]:
     return [(start, end, index == len(runs) - 1) for index, (start, end, _) in enumerate(runs)]
 
 
-def _candidates(scores: np.ndarray) -> dict:
+def _candidates(scores: np.ndarray, score_name: str = "correlation") -> dict:
     order = np.argsort(-scores, kind="stable")[:3]
-    return {"candidates": [{"tonic": KEYS[i][0], "mode": KEYS[i][1], "correlation": round(float(scores[i]), 3)}
+    return {"candidates": [{"tonic": KEYS[i][0], "mode": KEYS[i][1], score_name: round(float(scores[i]), 3)}
                            for i in order]}

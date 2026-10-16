@@ -1,4 +1,4 @@
-"""Chord evidence from beat-synchronous, tuned harmonic-suppressed chroma.
+"""Chord evidence from tuned harmonic-suppressed chroma.
 
 A small hand-built vocabulary and a uniform-switch Viterbi decoder make these low-confidence estimates.
 The decoder cannot identify a composer's intended spelling or separate instruments in a mix.

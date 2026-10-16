@@ -27,7 +27,7 @@ def features(pattern="ABAB", section_seconds=16):
     onset = np.zeros((int(seconds * 100), 3))
     onset[::50] = 1
     return SimpleNamespace(pcp=chroma, treble=chroma, timbre=timbre, seconds=seconds,
-                           row_rate=10.0, onset=onset, flux=onset.sum(axis=1), onset_rate=100.0,
+                           row_rate=10.0, source_rate=None, onset=onset, flux=onset.sum(axis=1), onset_rate=100.0,
                            loudness=np.repeat([0.001, 0.1], len(chroma) // 2),
                            brightness=np.repeat([800.0, 3500.0], len(chroma) // 2))
 

@@ -96,7 +96,7 @@ def _measure(file: sf.SoundFile) -> dict:
         "loudness": loudness.result() if loudness else None,
         "bands": bands, "centroid": centroid,
         "stereo": stereo.result() if stereo else None,
-        "features": features.finish(),
+        "features": features.finish(loudness_segments=loudness.segment_means() if loudness else None),
     }
 
 
@@ -116,8 +116,9 @@ def _report(header: tuple, measured: dict, source_id: str, evidence: Evidence, s
                  f" i mod {MAX_FEATURE_CHANNELS}) to bound cost; inverted channels sharing a group can cancel."
                  if store.folded else "")
     role = "mixdown" if scope == "mixdown" else "stem"
-    estimates, estimate_diagnostics = render(analyze(store, BACKENDS[backend], role),
-                                             ReportContext(detail, fold_note + lossy_note))
+    selected = BACKENDS[backend]
+    estimates, estimate_diagnostics = render(analyze(store, selected, role),
+                                             ReportContext(detail, fold_note + lossy_note), selected.name)
     facts += estimates
     for fact in facts:
         evidence.add(source_id, fact.property, fact.value, fact.unit, scope, fact.time_domain,

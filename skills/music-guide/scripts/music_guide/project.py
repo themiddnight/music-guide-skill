@@ -227,8 +227,13 @@ def _meter_points(staged: Evidence, source_id: str, scope: str
                 if signature is None:
                     signature = f'{point["numerator"]}/{point["denominator"]}'
                 top, bottom = (int(part) for part in signature.split("/"))
+                if not plausible_meter(top, bottom):
+                    staged.diagnostics.append(Diagnostic("implausible_value", "warning",
+                        f"Meter map {top}/{bottom} exceeds the supported 1-{MAX_METER_NUMERATOR} over "
+                        f"1-{MAX_METER_DENOMINATOR} range; bar rhythm was not derived.", source_id))
+                    raise ValueError("meter point is outside the supported range")
                 meter = rhythm.Meter(top, bottom)
-                if not math.isfinite(beat) or top <= 0 or bottom <= 0:
+                if not math.isfinite(beat):
                     raise ValueError("invalid meter point")
                 if beat in points and points[beat] != meter:
                     raise ValueError(f"conflicting meters at beat {beat:g}")
@@ -241,8 +246,8 @@ def _meter_points(staged: Evidence, source_id: str, scope: str
     try:
         top, bottom = (int(part) for part in static[0].value.split("/"))
         meter = rhythm.Meter(top, bottom)
-        if top <= 0 or bottom <= 0:
-            raise ValueError("invalid meter")
+        if not plausible_meter(top, bottom):
+            raise ValueError("meter is outside the supported range")
         return rhythm.BarGrid(((0.0, meter),)), static[0], None
     except (TypeError, ValueError, ZeroDivisionError) as error:
         return None, static[0], f"the stored meter cannot define a bar grid ({error})"
