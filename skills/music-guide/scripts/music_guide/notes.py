@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -14,6 +15,10 @@ class Note:
     end_beat: float
     channel: int | None = None
 
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.start_beat) and math.isfinite(self.end_beat)):
+            raise ValueError("note start and end beats must be finite")
+
 
 def pitch_name(pitch: int) -> str:
     # Scientific pitch notation with MIDI 60 as C4.
@@ -26,10 +31,12 @@ def _number(value: float) -> float | int:
 
 
 def _max_polyphony(notes: Sequence[Note]) -> int:
-    # An end and a start at the same beat do not overlap, so ends sort first.
-    events = sorted([(note.start_beat, 1) for note in notes] + [(note.end_beat, -1) for note in notes])
+    # An end and a start at the same beat do not overlap, so ends sort first. A zero-length note still sounds
+    # once, so its end sorts after every start at that beat.
+    events = sorted([(note.start_beat, 1, 1) for note in notes] +
+                    [(note.end_beat, 2 if note.end_beat == note.start_beat else 0, -1) for note in notes])
     current = peak = 0
-    for _, change in events:
+    for _, _, change in events:
         current += change
         peak = max(peak, current)
     return peak
@@ -44,6 +51,8 @@ def summarize_notes(notes: Sequence[Note]) -> dict[str, Any]:
         name = PITCH_CLASSES[note.pitch % 12]
         counts[name] += 1
         beats[name] += note.end_beat - note.start_beat
+    if not all(math.isfinite(value) for value in beats.values()):
+        raise ValueError("note durations exceed the finite numeric range")
     low = min(note.pitch for note in notes)
     high = max(note.pitch for note in notes)
     velocities = [note.velocity for note in notes]

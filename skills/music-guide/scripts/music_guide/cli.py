@@ -62,6 +62,15 @@ def _merge(target: Evidence, staged: Evidence) -> None:
     target.diagnostics.extend(staged.diagnostics)
 
 
+# Failures a parser reports on purpose. Anything else is a defect worth naming by type.
+EXPECTED_ERRORS = (OSError, ValueError, TypeError, KeyError, EOFError, zipfile.BadZipFile, ET.ParseError,
+                   DefusedXmlException, sf.LibsndfileError, RecursionError)
+
+
+def _describe(error: Exception) -> str:
+    return str(error) if isinstance(error, EXPECTED_ERRORS) else f"unexpected {type(error).__name__}: {error}"
+
+
 def _require_file(path: Path, limit: int) -> None:
     if not path.is_file():
         raise ValueError("source is not a readable regular file")
@@ -120,22 +129,20 @@ def build(mixdown: Path | None, optionals: list[tuple[str, Path]], declarations:
             staged = Evidence()
             fmt.adapter(path, source_id, staged, detail)
             _merge(evidence, staged)
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, EOFError,
-                sf.LibsndfileError, zipfile.BadZipFile, ET.ParseError, DefusedXmlException,
-                RecursionError) as error:
+        except Exception as error:  # Last-resort boundary: one hostile optional source must not lose the others.
             source.status = "error"
             if role == "mixdown":
-                raise ValueError(f"required mixdown {path.name}: {error}") from error
+                raise ValueError(f"required mixdown {path.name}: {_describe(error)}") from error
             evidence.diagnostics.append(Diagnostic("optional_source_error", "warning",
-                f"Could not parse optional {role} {path.name}: {error}", source_id))
+                f"Could not parse optional {role} {path.name}: {_describe(error)}", source_id))
     if declarations:
         try:
             _load_declarations(declarations, evidence)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError, RecursionError) as error:
+        except Exception as error:
             source_id = f"s{len(evidence.sources) + 1}"
             evidence.sources.append(Source(source_id, declarations.name, "declarations", "json-declarations", "error", None))
             evidence.diagnostics.append(Diagnostic("optional_source_error", "warning",
-                f"Could not parse declarations {declarations.name}: {error}", source_id))
+                f"Could not parse declarations {declarations.name}: {_describe(error)}", source_id))
     detect_conflicts(evidence)
     return evidence
 

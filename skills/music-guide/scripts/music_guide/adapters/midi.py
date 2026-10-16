@@ -8,7 +8,10 @@ from .common import MAX_MIDI_BYTES, _read_bounded
 
 def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None:
     raw = _read_bounded(path, MAX_MIDI_BYTES)
-    song = mido.MidiFile(file=io.BytesIO(raw))
+    try:
+        song = mido.MidiFile(file=io.BytesIO(raw))
+    except Exception as error:  # mido leaks IndexError, KeyError, struct.error and its own KeySignatureError.
+        raise ValueError(f"malformed MIDI data ({type(error).__name__}): {error}") from error
     if song.type not in (0, 1):
         raise ValueError("MIDI type 2 is unsupported; export SMF 0 or 1")
     if song.ticks_per_beat <= 0:

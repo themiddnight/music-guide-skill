@@ -83,7 +83,7 @@ def _read_zip_member(path: Path, member: str, limit: int, *, max_entries: int = 
 def _parse_xml(raw: bytes) -> Element:
     try:
         return DefusedET.fromstring(raw, forbid_dtd=True, forbid_entities=True, forbid_external=True)
-    except (DefusedET.ParseError, DefusedXmlException) as error:
+    except (DefusedET.ParseError, DefusedXmlException, LookupError) as error:
         raise ValueError(f"unsafe or malformed XML: {error}") from error
 
 
