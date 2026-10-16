@@ -139,6 +139,22 @@ class SwingTest(unittest.TestCase):
                 self.assertAlmostEqual(swing.ratio, ratio, delta=delta)
                 self.assertGreaterEqual(swing.pairs, 16)
 
+    def test_swing_reads_one_subdivision_and_skips_ambiguous_ones(self):
+        readable = ((100, ((0.5, 0.3),), 1.0), (120, ((2 / 3, 0.3),), 2.0), (120, ((0.75, 0.3),), 3.0),
+                    (100, ((0.25, 0.15), (0.5, 0.4), (0.75, 0.15)), 1.0))
+        for bpm, hats, ratio in readable:
+            with self.subTest(hats=hats):
+                store, grid = grid_of(with_hats(bpm, hats)[0])
+                swing = beats.swing(store, grid)
+                self.assertIsInstance(swing, beats.Swing)
+                self.assertAlmostEqual(swing.ratio, ratio, delta=0.15 * ratio)
+        for hats in (((0.25, 0.15), (0.5, 0.2), (0.75, 0.35)), ((0.25, 0.3), (0.5, 0.3), (0.75, 0.3))):
+            with self.subTest(hats=hats):
+                store, grid = grid_of(with_hats(100, hats)[0])
+                swing = beats.swing(store, grid)
+                self.assertIsInstance(swing, Skip)
+                self.assertIn("subdivision is ambiguous", swing.reason)
+
     def test_beats_without_offbeats_skip_swing(self):
         samples, _, _ = click_track(120, 4, 30)
         store, grid = grid_of(samples)

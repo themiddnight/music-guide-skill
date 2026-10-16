@@ -39,6 +39,13 @@ METERS = ((2, "2/4"), (3, "3/4"), (4, "4/4"), (6, "6/8"))
 MIN_SWING_PAIRS = 16
 # An off-beat peak counts toward swing only when it reaches this share of the onset on the beat before it.
 OFFBEAT_SHARE = 0.2
+# The mean onset envelope across beats, resampled to this many points per beat, shows the sub-beat pattern. Swing
+# is read only when one peak inside SWING_SEARCH stands out: a second peak at this share of the tallest means
+# sixteenths or triplets compete with the eighth. Log flux is compressive: on the test signals, sixteenths at 3/8
+# of the eighth's gain still peak at 0.67 of it, and an eighth at 4/7 of a louder third sixteenth peaks at 0.81.
+SUB_BEAT_BINS = 48
+DISTINCT_PEAK_SHARE = 0.75
+SWING_SEARCH = (0.2, 0.85)
 
 TEMPO_METHOD = Method("onset-autocorrelation",
                       "top autocorrelation peaks of a spectral-flux onset envelope within 60-200 BPM, using FFT"
@@ -112,8 +119,9 @@ METER_METHOD = Method("accent-pattern-meter",
                       " consistent with accents alone; a pickup or an intro without accents can shift the downbeat.")
 SWING_METHOD = Method("offbeat-onset-position",
                       "median long-to-short ratio of the strongest onset between consecutive beats, counted only at"
-                      " 40-80% of the beat. Swung sixteenths, a shuffle felt against a half-time grid and loose timing"
-                      " are not told apart.")
+                      " 40-80% of the beat. It skips when the mean onset pattern between beats has two similar peaks,"
+                      " such as straight or swung sixteenths, because the subdivision is then ambiguous. A shuffle"
+                      " felt against a half-time grid and loose timing are not told apart.")
 
 
 @dataclass(frozen=True)
@@ -269,11 +277,31 @@ def meter(store: FeatureStore, beats: BeatGrid) -> MeterEstimate | Skip:
     return MeterEstimate(tuple((signature, score) for score, signature, _, _ in scored), phase, times[phase::size])
 
 
+def _sub_beat_peaks(flux: np.ndarray, rate: float, times: np.ndarray) -> list[float]:
+    """Beat fractions of the distinct peaks of the mean onset envelope inside SWING_SEARCH, tallest first."""
+    fractions = np.arange(SUB_BEAT_BINS) / SUB_BEAT_BINS
+    positions = (times[:-1, None] + fractions[None, :] * np.diff(times)[:, None]) * rate
+    profile = np.interp(positions, np.arange(len(flux)), flux).mean(axis=0)
+    low, high = math.ceil(SWING_SEARCH[0] * SUB_BEAT_BINS), math.floor(SWING_SEARCH[1] * SUB_BEAT_BINS) + 1
+    peaks = low + signal.find_peaks(profile[low:high])[0]
+    if not len(peaks):
+        return []
+    tallest = profile[peaks].max()
+    distinct = sorted(peaks[profile[peaks] >= DISTINCT_PEAK_SHARE * tallest], key=lambda peak: -profile[peak])
+    return [float(fractions[peak]) for peak in distinct]
+
+
 def swing(store: FeatureStore, beats: BeatGrid) -> Swing | Skip:
     flux, rate = store.flux, store.onset_rate
+    peaks = _sub_beat_peaks(flux, rate, beats.times)
+    if len(peaks) > 1:
+        where = ", ".join(f"{peak:.2f}" for peak in sorted(peaks))
+        return Skip(f"the onsets between beats peak at {where} of the beat with similar strength, so the subdivision"
+                    " is ambiguous and a long-to-short ratio would depend on which peak is read.")
     positions = []
     for index, (here, after) in enumerate(zip(beats.times[:-1], beats.times[1:])):
-        low, high = math.ceil((here + 0.2 * (after - here)) * rate), math.floor((here + 0.85 * (after - here)) * rate)
+        low, high = (math.ceil((here + SWING_SEARCH[0] * (after - here)) * rate),
+                     math.floor((here + SWING_SEARCH[1] * (after - here)) * rate))
         if high <= low:
             continue
         peak = low + int(np.argmax(flux[low:high + 1]))
