@@ -11,7 +11,8 @@ from defusedxml import ElementTree as DefusedET
 from defusedxml.common import DefusedXmlException
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
-MAX_MIDI_BYTES = 32 * 1024 * 1024
+# mido holds every message as an object (about 130 bytes of RAM per file byte), so the bound is tight.
+MAX_MIDI_BYTES = 4 * 1024 * 1024
 MAX_XML_BYTES = 8 * 1024 * 1024
 MAX_ZIP_ENTRIES = 256
 MAX_ZIP_BYTES = 64 * 1024 * 1024

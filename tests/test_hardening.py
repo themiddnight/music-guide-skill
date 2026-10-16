@@ -242,5 +242,58 @@ class AudioEstimateReasonTest(CliCase):
         self.assertAlmostEqual(facts["audio.stereo_correlation"]["value"], 1.0, places=6)
 
 
+class MidiBoundsTest(CliCase):
+    def test_oversized_midi_is_refused(self):
+        big = self.write("big.mid", smf(END_OF_TRACK))
+        with big.open("ab") as stream:
+            stream.truncate(4 * 1024 * 1024 + 1)
+        data = self.evidence("--midi", big)
+        self.assert_optional_error(data)
+        self.assertIn("byte limit", next(item["message"] for item in data["diagnostics"] if item["code"] == "optional_source_error"))
+
+    def test_unmatched_note_offs_collapse_into_one_diagnostic_per_track(self):
+        track = b"\x00\x80\x3c\x00" + b"\x00\x3c\x00" * 50000 + b"\x00\xff\x06\x01x"
+        data = self.evidence("--midi", self.write("offs.mid", smf(track + END_OF_TRACK)))
+        offs = [item for item in data["diagnostics"] if item["code"] == "unmatched_note_off"]
+        self.assertEqual(len(offs), 1)
+        self.assertIn("50001", offs[0]["message"])
+        self.assertIn("track 0", offs[0]["message"])
+
+    def test_unmatched_note_ons_collapse_into_one_diagnostic_per_track(self):
+        track = b"".join(b"\x00\x90" + bytes([p, 0x40]) for p in range(40, 60)) + END_OF_TRACK
+        data = self.evidence("--midi", self.write("ons.mid", smf(track)))
+        ons = [item for item in data["diagnostics"] if item["code"] == "unmatched_note_on"]
+        self.assertEqual(len(ons), 1)
+        self.assertIn("20 MIDI note(s) in track 0", ons[0]["message"])
+
+    def test_full_detail_caps_listed_notes_and_keeps_the_summary(self):
+        from music_guide import cli
+        from music_guide.adapters import midi
+        pairs = b"".join(b"\x00\x90" + bytes([60 + n % 20, 0x40]) + b"\x10\x80" + bytes([60 + n % 20, 0]) for n in range(30))
+        path = self.write("many.mid", smf(pairs + END_OF_TRACK))
+        with mock.patch.object(midi, "MAX_NOTE_LISTING", 10):
+            result = cli.build(None, [("midi", path)], None, "full")
+        notes = [item for item in result.observations if item.property == "midi.note"]
+        self.assertEqual(len(notes), 10)
+        self.assertEqual(sum(item.code == "project_list_truncated" for item in result.diagnostics), 1)
+        summary = next(item for item in result.observations if item.property == "midi.track_summary")
+        self.assertEqual(summary.value["noteCount"], 30)
+
+    def test_tempo_names_and_meter_lists_are_capped(self):
+        tempo = b"\x00\xff\x51\x03\x07\xa1\x20" * 6000
+        names = b"\x00\xff\x03\x01a" * 6000
+        data = self.evidence("--midi", self.write("lists.mid", smf(tempo + names + END_OF_TRACK)))
+        tempo_map = next(item["value"] for item in data["observations"] if item["property"] == "midi.tempo_map")
+        self.assertEqual(len(tempo_map), 5000)
+        self.assertEqual(sum(item["property"] == "midi.track_name" for item in data["observations"]), 5000)
+        self.assertEqual(sum(item["code"] == "project_list_truncated" for item in data["diagnostics"]), 2)
+
+    def test_overlapping_notes_pair_first_in_first_out(self):
+        track = (b"\x00\x90\x3c\x40\x10\x90\x3c\x50\x10\x80\x3c\x00\x10\x80\x3c\x00" + END_OF_TRACK)
+        data = self.evidence("--midi", self.write("fifo.mid", smf(track)), "--detail", "full")
+        notes = [item["value"] for item in data["observations"] if item["property"] == "midi.note"]
+        self.assertEqual([(n["velocity"], n["startTick"], n["endTick"]) for n in notes], [(64, 0, 32), (80, 16, 48)])
+
+
 if __name__ == "__main__":
     unittest.main()
