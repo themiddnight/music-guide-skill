@@ -84,20 +84,34 @@ class Evidence:
         }
 
 
+TEMPO_TOLERANCE_BPM = 0.01
+# Inferred estimates are interpretations, so they never raise automatic conflicts.
+COMPARABLE_PROVENANCE = {"measured", "extracted", "user_declared"}
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _disagree(property: str, values: list[Any]) -> bool:
+    # MIDI stores tempo in whole microseconds per beat, so 92 BPM reads back as 91.99999.
+    if property == "tempo" and all(_is_number(value) for value in values):
+        return max(values) - min(values) > TEMPO_TOLERANCE_BPM
+    first = values[0]
+    return any(isinstance(value, bool) != isinstance(first, bool) or value != first for value in values[1:])
+
+
 def detect_conflicts(evidence: Evidence) -> None:
     shared_properties = {"tempo", "meter"}
     groups: dict[tuple[str, str, str, str], list[Observation]] = {}
     for item in evidence.observations:
-        if item.timeDomain != "static" or item.property not in shared_properties:
+        if (item.timeDomain != "static" or item.property not in shared_properties
+                or item.provenance not in COMPARABLE_PROVENANCE):
             continue
         key = (item.property, item.scope, item.unit, item.timeDomain)
         groups.setdefault(key, []).append(item)
     for (property, scope, unit, domain), group in groups.items():
-        if len(group) < 2:
-            continue
-        first = group[0].value
-        if any((isinstance(item.value, bool) != isinstance(first, bool)) or item.value != first
-               for item in group[1:]):
+        if len(group) >= 2 and _disagree(property, [item.value for item in group]):
             evidence.conflicts.append(Conflict(
                 observationIds=[item.id for item in group], property=property,
                 scope=scope, unit=unit, timeDomain=domain))

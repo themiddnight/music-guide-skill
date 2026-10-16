@@ -17,6 +17,8 @@ def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
     evidence.add(source_id, "midi.ticks_per_beat", ticks_per_beat, "ticks/quarter_note",
                  "project", "static", "header", "mido", "extracted", "high", "Stored MIDI header time division.")
     note_count = 0
+    tempos: list[tuple[int, str, float]] = []
+    meters: list[tuple[int, str, str]] = []
     for track_index, track in enumerate(song.tracks):
         tick = 0
         pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
@@ -31,13 +33,9 @@ def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
             elif msg.type == "set_tempo":
                 if msg.tempo <= 0:
                     raise ValueError(f"invalid MIDI tempo at {locator}")
-                evidence.add(source_id, "tempo", round(mido.tempo2bpm(msg.tempo), 8), "BPM",
-                             "project", "midi_ticks", locator,
-                             "mido", "extracted", "high", "Stored MIDI tempo event; may change later.")
+                tempos.append((tick, locator, round(mido.tempo2bpm(msg.tempo), 8)))
             elif msg.type == "time_signature":
-                evidence.add(source_id, "meter", f"{msg.numerator}/{msg.denominator}", "signature",
-                             "project", "midi_ticks", locator,
-                             "mido", "extracted", "high", "Stored MIDI meter event; may change later.")
+                meters.append((tick, locator, f"{msg.numerator}/{msg.denominator}"))
             elif msg.type == "note_on" and msg.velocity > 0:
                 pending.setdefault((msg.channel, msg.note), []).append((tick, msg.velocity))
             elif msg.type in ("note_off", "note_on"):
@@ -67,5 +65,23 @@ def midi(path: Path, source_id: str, evidence: Evidence, detail: Detail) -> None
             evidence.add(source_id, "midi.track_summary", summarize_notes(notes), "note_summary",
                          f"midi_track:{track_index}", "static", f"track={track_index}", "mido+summarize_notes",
                          "extracted", "high", "Aggregated from paired stored notes; beats are quarter notes, not audible timing.")
+    _timeline(evidence, source_id, ticks_per_beat, tempos, "tempo", "bpm", "BPM", "set_tempo")
+    _timeline(evidence, source_id, ticks_per_beat, meters, "meter", "meter", "signature", "time_signature")
     evidence.add(source_id, "midi.note_count", note_count, "count", "project", "static",
                  "whole file", "mido", "extracted", "high", "Count of paired MIDI note events.")
+
+
+def _timeline(evidence: Evidence, source_id: str, ticks_per_beat: int, events: list[tuple[int, str, object]],
+              prop: str, key: str, unit: str, event_name: str) -> None:
+    if not events:
+        return
+    events = sorted(events, key=lambda event: event[0])
+    evidence.add(source_id, f"midi.{prop}_map",
+                 [{"tick": tick, "beat": tick / ticks_per_beat, key: value} for tick, _, value in events],
+                 unit, "project", "midi_ticks", f"all {event_name} events", "mido", "extracted", "high",
+                 f"Stored MIDI {event_name} events in tick order across all tracks.")
+    if len(events) == 1 and events[0][0] == 0:
+        _, locator, value = events[0]
+        evidence.add(source_id, prop, value, unit, "project", "static", locator,
+                     f"midi-constant-{prop}", "extracted", "high",
+                     f"The file's only {event_name} event, at tick 0, so it holds for the whole file; render not verified.")

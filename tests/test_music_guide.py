@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import subprocess
 import sys
@@ -15,6 +16,10 @@ import soundfile as sf
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(SKILL / "scripts"))
+
+from music_guide.model import Evidence, detect_conflicts  # noqa: E402
+
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 DECLARATIONS_SCHEMA = json.loads((SKILL / "schemas" / "declarations.schema.json").read_text())
 
@@ -79,8 +84,10 @@ class MusicGuideTest(unittest.TestCase):
         data = self.evidence("--midi", midi_path, "--detail", "full")
         notes = [item for item in data["observations"] if item["property"] == "midi.note"]
         self.assertEqual(notes[0]["value"]["endBeat"], 1)
-        tempos = [item for item in data["observations"] if item["property"] == "tempo"]
-        self.assertEqual(len(tempos), 2)
+        tempo_map = [item for item in data["observations"] if item["property"] == "midi.tempo_map"]
+        self.assertEqual([item["value"] for item in tempo_map],
+                         [[{"tick": 0, "beat": 0, "bpm": 120}, {"tick": 480, "beat": 1, "bpm": 100}]])
+        self.assertFalse(any(item["property"] == "tempo" for item in data["observations"]))
         self.assertFalse(data["conflicts"])
         mido.MidiFile(type=2, ticks_per_beat=480, tracks=[track]).save(midi_path)
         data = self.evidence("--midi", midi_path)
@@ -348,6 +355,65 @@ class MusicGuideTest(unittest.TestCase):
         self.assertEqual(len(notes), 3000)
         self.assertEqual(notes[-1]["endBeat"], 750)
         self.assertEqual(self.run_cli("--midi", path, "--detail", "everything", mixdown=False).returncode, 2)
+
+    def declare(self, *facts):
+        path = self.dir / "declarations.json"
+        path.write_text(json.dumps([{"property": prop, "value": value, "unit": unit, "scope": "project"}
+                                    for prop, value, unit in facts]))
+        return path
+
+    def test_single_midi_tempo_and_meter_become_static_claims(self):
+        conductor = [mido.MetaMessage("set_tempo", tempo=652174),
+                     mido.MetaMessage("time_signature", numerator=3, denominator=4)]
+        path = self.write_midi("constant.mid", conductor, [mido.Message("note_on", note=60, velocity=80),
+                                                           mido.Message("note_off", note=60, time=480)])
+        data = self.evidence("--midi", path, mixdown=False)
+        tempo = next(item for item in data["observations"] if item["property"] == "tempo")
+        self.assertAlmostEqual(tempo["value"], 92, places=3)
+        self.assertEqual((tempo["timeDomain"], tempo["scope"], tempo["method"]), ("static", "project", "midi-constant-tempo"))
+        self.assertIn("tick=0", tempo["locator"])
+        self.assertIn("only", tempo["confidenceReason"])
+        meter = next(item for item in data["observations"] if item["property"] == "meter")
+        self.assertEqual((meter["value"], meter["timeDomain"], meter["method"]), ("3/4", "static", "midi-constant-meter"))
+        agree = self.evidence("--midi", path, "--declarations", self.declare(("tempo", 92, "BPM"), ("meter", "3/4", "signature")), mixdown=False)
+        self.assertEqual(agree["conflicts"], [])
+        disagree = self.evidence("--midi", path, "--declarations", self.declare(("tempo", 95, "BPM"), ("meter", "4/4", "signature")), mixdown=False)
+        self.assertEqual(sorted(item["property"] for item in disagree["conflicts"]), ["meter", "tempo"])
+        self.assertIn(tempo["id"], next(item for item in disagree["conflicts"] if item["property"] == "tempo")["observationIds"])
+
+    def test_changing_or_late_midi_tempo_makes_no_static_claim(self):
+        cases = {
+            "late": ([mido.MetaMessage("set_tempo", tempo=500000, time=480)], []),
+            "two_tracks": ([mido.MetaMessage("set_tempo", tempo=500000)], [mido.MetaMessage("set_tempo", tempo=600000, time=960)]),
+        }
+        for name, tracks in cases.items():
+            with self.subTest(name=name):
+                path = self.write_midi(f"{name}.mid", *tracks)
+                data = self.evidence("--midi", path, "--declarations", self.declare(("tempo", 125, "BPM")), mixdown=False)
+                self.assertFalse(any(item["property"] == "tempo" and item["provenance"] == "extracted"
+                                     for item in data["observations"]))
+                self.assertEqual(data["conflicts"], [])
+                tempo_map = next(item["value"] for item in data["observations"] if item["property"] == "midi.tempo_map")
+                self.assertEqual(tempo_map[-1]["bpm"], 100 if name == "two_tracks" else 120)
+        path = self.write_midi("meters.mid", [mido.MetaMessage("time_signature", numerator=4, denominator=4),
+                                              mido.MetaMessage("time_signature", numerator=7, denominator=8, time=1920)])
+        data = self.evidence("--midi", path, mixdown=False)
+        self.assertFalse(any(item["property"] == "meter" for item in data["observations"]))
+        self.assertEqual(next(item["value"] for item in data["observations"] if item["property"] == "midi.meter_map"),
+                         [{"tick": 0, "beat": 0, "meter": "4/4"}, {"tick": 1920, "beat": 4, "meter": "7/8"}])
+
+    def test_conflicts_use_tempo_tolerance_and_ignore_inferred_values(self):
+        def tempo_conflicts(*claims):
+            evidence = Evidence()
+            for provenance, value in claims:
+                evidence.add("s1", "tempo", value, "BPM", "project", "static", "here", "test", provenance, "low", "test")
+            detect_conflicts(evidence)
+            return evidence.conflicts
+        self.assertEqual(tempo_conflicts(("extracted", 120.0), ("user_declared", 120.009)), [])
+        self.assertEqual(len(tempo_conflicts(("extracted", 120.0), ("user_declared", 120.02))), 1)
+        self.assertEqual(tempo_conflicts(("inferred", 96.0), ("extracted", 120.0), ("user_declared", 120)), [])
+        self.assertEqual(tempo_conflicts(("inferred", 96.0), ("measured", 120.0)), [])
+        self.assertEqual(len(tempo_conflicts(("inferred", 96.0), ("measured", 120.0), ("extracted", 100))[0].observationIds), 2)
 
 
 if __name__ == "__main__":
