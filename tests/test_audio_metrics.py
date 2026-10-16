@@ -21,8 +21,10 @@ import jsonschema
 import numpy as np
 import soundfile as sf
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
+
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
 
@@ -54,8 +56,7 @@ class AudioMetricsTest(unittest.TestCase):
         return self.analyze_path(path)
 
     def analyze_path(self, path: Path) -> dict:
-        result = subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(path)],
-                                cwd=self.dir, text=True, capture_output=True)
+        result = run_cli("--mixdown", path, cwd=self.dir)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         data = json.loads(result.stdout)
@@ -66,6 +67,20 @@ class AudioMetricsTest(unittest.TestCase):
 
     def value(self, data: dict, prop: str):
         return data["facts"][prop]["value"]
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        path = self.dir / "mix.wav"
+        sf.write(path, stereo(tone(-23, 5)), RATE, subtype="FLOAT")
+        result = assert_matches_subprocess(self, "--mixdown", path, cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        loudness = next(item["value"] for item in json.loads(result.stdout)["observations"]
+                        if item["property"] == "audio.integrated_loudness")
+        self.assertAlmostEqual(loudness, -23.0, delta=0.1)
+        broken = self.dir / "broken.mp3"
+        broken.write_text("not audio at all\n" * 20)
+        failed = assert_matches_subprocess(self, "--mixdown", broken, cwd=self.dir)
+        self.assertEqual(failed.returncode, 2)
+        self.assertIn("not a decodable audio file", failed.stderr)
 
     def test_bs1770_reference_levels(self):
         cases = [
@@ -235,8 +250,7 @@ class AudioMetricsTest(unittest.TestCase):
             with self.subTest(name=name):
                 path = self.dir / name
                 path.write_text("not audio at all\n" * 20)
-                result = subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), "--mixdown", str(path)],
-                                        text=True, capture_output=True)
+                result = run_cli("--mixdown", path, cwd=self.dir)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertIn("not a decodable audio file", result.stderr)

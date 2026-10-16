@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import struct
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,10 +12,11 @@ from pathlib import Path
 
 import jsonschema
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
+
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
-sys.path.insert(0, str(SKILL / "scripts"))
 
 from music_guide.adapters import cubase, flstudio, studioone  # noqa: E402
 
@@ -28,8 +28,7 @@ class ProjectCliTest(unittest.TestCase):
         self.dir = Path(self.tmp.name)
 
     def run_cli(self, *args):
-        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True)
+        return run_cli(*args, cwd=self.dir)
 
     def evidence(self, *args):
         result = self.run_cli(*args)
@@ -142,6 +141,11 @@ class FlStudioTest(ProjectCliTest):
         path = self.dir / name
         path.write_bytes(flp(kwargs.pop("events", None) or fl_events(), **kwargs))
         return path
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        result = assert_matches_subprocess(self, "--project", self.write(), cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["adapter"], "fl-studio-flp")
 
     def test_project_facts_and_pattern_summary(self):
         data = self.project(self.write())

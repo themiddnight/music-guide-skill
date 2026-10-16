@@ -4,17 +4,20 @@ import json
 import os
 import plistlib
 import stat
-import subprocess
 import sys
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 import jsonschema
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
+from music_guide.adapters import logic  # noqa: E402
+
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 
 
@@ -25,8 +28,7 @@ class ProjectCliCase(unittest.TestCase):
         self.dir = Path(self.tmp.name)
 
     def run_cli(self, *args, **options):
-        return subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *map(str, args)],
-                              cwd=self.dir, text=True, capture_output=True, timeout=120, **options)
+        return run_cli(*args, cwd=self.dir, **options)
 
     def evidence(self, *args):
         result = self.run_cli(*args)
@@ -67,6 +69,11 @@ class LogicPackageTest(ProjectCliCase):
             (folder / "ProjectData").write_bytes(b"\x00binary that must never be parsed")
             (folder / "MetaData.plist").write_bytes(plistlib.dumps(self.meta(number, meta), fmt=fmt))
         return package
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        result = assert_matches_subprocess(self, "--project", self.make_package(), cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["status"], "ok")
 
     @staticmethod
     def meta(number, overrides=None):

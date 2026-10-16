@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,10 +11,9 @@ import jsonschema
 import numpy as np
 import soundfile as sf
 
-ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "music-guide"
-sys.path.insert(0, str(SKILL / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from support import SKILL, assert_matches_subprocess, run_cli  # noqa: E402
 from music_guide.adapters.reaper import Timeline, _parse_blocks  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
@@ -101,8 +99,7 @@ class DawBase(unittest.TestCase):
 
     def evidence(self, *args, mixdown=False):
         prefix = ["--mixdown", str(self.mix)] if mixdown else []
-        result = subprocess.run([sys.executable, str(SKILL / "scripts" / "analyze.py"), *prefix, *map(str, args)],
-                                cwd=self.dir, text=True, capture_output=True)
+        result = run_cli(*prefix, *args, cwd=self.dir)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         data = json.loads(result.stdout)
@@ -131,6 +128,11 @@ class AbletonTest(DawBase):
         path = self.dir / name
         path.write_bytes(gzip.compress(xml.encode()))
         return path
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        result = assert_matches_subprocess(self, "--project", self.write(LIVE_11), cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["adapter"], "ableton-als")
 
     def test_live_11_set_extracts_stored_intent(self):
         data = self.evidence("--project", self.write(LIVE_11))
@@ -364,6 +366,11 @@ class ReaperTest(DawBase):
         path = self.dir / name
         path.write_text(text, encoding="utf-8")
         return path
+
+    def test_subprocess_smoke_matches_the_in_process_runner(self):
+        result = assert_matches_subprocess(self, "--project", self.write(), cwd=self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["adapter"], "reaper-rpp")
 
     def test_project_extracts_stored_intent(self):
         data = self.evidence("--project", self.write())
