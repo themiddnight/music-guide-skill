@@ -1,0 +1,138 @@
+{
+ "name": "synthetic",
+ "tempoBpm": 120,
+ "meter": "4/4",
+ "beats": [
+  0.0,
+  0.5,
+  1.0,
+  1.5,
+  2.0,
+  2.5,
+  3.0,
+  3.5,
+  4.0,
+  4.5,
+  5.0,
+  5.5,
+  6.0,
+  6.5,
+  7.0,
+  7.5
+ ],
+ "downbeats": [
+  0.0,
+  2.0,
+  4.0,
+  6.0
+ ],
+ "keys": [
+  {
+   "startSeconds": 0,
+   "endSeconds": 4,
+   "tonic": "D",
+   "mode": "minor"
+  },
+  {
+   "startSeconds": 4,
+   "endSeconds": 8,
+   "tonic": "F",
+   "mode": "major"
+  }
+ ],
+ "chords": [
+  {
+   "startSeconds": 0,
+   "endSeconds": 2,
+   "label": "D:sus2"
+  },
+  {
+   "startSeconds": 2,
+   "endSeconds": 4,
+   "label": "F:maj"
+  },
+  {
+   "startSeconds": 4,
+   "endSeconds": 6,
+   "label": "A#:maj"
+  },
+  {
+   "startSeconds": 6,
+   "endSeconds": 8,
+   "label": "A:7"
+  }
+ ],
+ "firstChord": "D:sus2",
+ "melody": [
+  {
+   "startSeconds": 0.0,
+   "endSeconds": 0.5,
+   "midi": 62
+  },
+  {
+   "startSeconds": 0.5,
+   "endSeconds": 1.0,
+   "midi": 65
+  },
+  {
+   "startSeconds": 1.0,
+   "endSeconds": 1.5,
+   "midi": 69
+  },
+  {
+   "startSeconds": 2.0,
+   "endSeconds": 2.5,
+   "midi": 65
+  },
+  {
+   "startSeconds": 2.5,
+   "endSeconds": 3.0,
+   "midi": 64
+  },
+  {
+   "startSeconds": 3.0,
+   "endSeconds": 3.5,
+   "midi": 62
+  },
+  {
+   "startSeconds": 4.0,
+   "endSeconds": 4.5,
+   "midi": 70
+  },
+  {
+   "startSeconds": 4.5,
+   "endSeconds": 5.0,
+   "midi": 72
+  },
+  {
+   "startSeconds": 5.0,
+   "endSeconds": 5.5,
+   "midi": 74
+  },
+  {
+   "startSeconds": 6.0,
+   "endSeconds": 6.5,
+   "midi": 69
+  },
+  {
+   "startSeconds": 6.5,
+   "endSeconds": 7.0,
+   "midi": 67
+  },
+  {
+   "startSeconds": 7.0,
+   "endSeconds": 7.5,
+   "midi": 65
+  }
+ ],
+ "structure": [
+  {
+   "startSeconds": 0,
+   "letter": "A"
+  },
+  {
+   "startSeconds": 4,
+   "letter": "B"
+  }
+ ]
+}
