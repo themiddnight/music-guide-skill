@@ -1,8 +1,8 @@
 """Types every analyzer shares, and the one constructor for estimate facts."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence, TypeVar, Union
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, Sequence, Union
 
 from ..model import Confidence, Detail, Fact, check_finite, native
 
@@ -20,8 +20,9 @@ class Skip:
 
 @dataclass(frozen=True)
 class Limit:
-    """One sentence about data a produced estimate dropped. It is appended to the reason and diagnosed."""
+    """One sentence about data an estimate dropped, kept with the property it was dropped from."""
 
+    property: str
     message: str
 
 
@@ -33,8 +34,17 @@ class Method:
     reason: str
 
 
-R = TypeVar("R")
-Outcome = Union[R, Skip]
+
+
+@dataclass(frozen=True)
+class Report:
+    """What a result reports: its facts, and the cuts each fact made, which become truncation diagnostics."""
+
+    facts: tuple[Fact, ...] = ()
+    limits: tuple[Limit, ...] = ()
+
+    def __add__(self, other: Report) -> Report:
+        return Report(self.facts + other.facts, self.limits + other.limits)
 
 
 @dataclass(frozen=True)
@@ -43,30 +53,34 @@ class ReportContext:
 
     detail: Detail
     note: str
-    limits: list[Limit] = field(default_factory=list, compare=False)
 
     @property
     def full(self) -> bool:
         return self.detail == "full"
 
-    def estimate(self, property: str, value: Any, unit: str, method: Method, limits: Sequence[Limit | None] = ()
-                 ) -> Fact:
-        """The only constructor for estimate facts: always inferred and low, always naming its method."""
+    def estimate(self, property: str, value: Any, unit: str, method: Method, cuts: Sequence[str | None] = ()
+                 ) -> Report:
+        """The only constructor for estimate facts: always inferred and low, always naming its method.
+
+        `cuts` are the sentences `cap` returned; each is appended to the reason and becomes a Limit on `property`.
+        """
         if not method.reason.strip():
             raise ValueError(f"{property}: an estimate must state its method")
-        kept = [limit for limit in limits if limit is not None]
-        self.limits.extend(kept)
-        reason = ESTIMATE_PREFIX + method.reason + "".join(" " + limit.message for limit in kept) + self.note
-        return self._fact(property, value, unit, method.name, reason, "low", "inferred")
+        kept = tuple(cut for cut in cuts if cut is not None)
+        reason = ESTIMATE_PREFIX + method.reason + "".join(" " + cut for cut in kept) + self.note
+        fact = self._fact(property, value, unit, method.name, reason, "low", "inferred")
+        return Report((fact,), tuple(Limit(property, cut) for cut in kept))
 
     def measurement(self, property: str, value: Any, unit: str, method: str, reason: str,
-                    confidence: Confidence) -> Fact:
-        return self._fact(property, value, unit, method, reason + self.note, confidence, "measured")
+                    confidence: Confidence) -> Report:
+        return Report((self._fact(property, value, unit, method, reason + self.note, confidence, "measured"),))
 
-    def cap(self, items: Sequence, limit: int, what: str) -> tuple[list, Limit | None]:
+    @staticmethod
+    def cap(items: Sequence, limit: int, what: str) -> tuple[list, str | None]:
+        """At most `limit` items, and the sentence saying how many were dropped when any were."""
         if len(items) <= limit:
             return list(items), None
-        return list(items[:limit]), Limit(f"Only the first {limit} of {len(items)} {what} are listed.")
+        return list(items[:limit]), f"Only the first {limit} of {len(items)} {what} are listed."
 
     @staticmethod
     def _fact(property: str, value: Any, unit: str, method: str, reason: str, confidence: Confidence,
@@ -74,3 +88,13 @@ class ReportContext:
         value = native(value)
         check_finite(property, value)
         return Fact(property, value, unit, method, reason, confidence, provenance)
+
+
+class Result(Protocol):
+    """A produced estimate: anything that can report itself."""
+
+    def report(self, ctx: ReportContext) -> Report: ...
+
+
+Outcome = Union[Result, Skip]
+

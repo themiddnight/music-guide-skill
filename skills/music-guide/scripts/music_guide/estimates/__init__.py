@@ -5,12 +5,11 @@ missing. A keyword argument is optional and reaches the analyzer as `result | Sk
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from ..model import Diagnostic, Fact
 from . import beats, harmony
-from .beats import beat_grid, meter
 from .common import Outcome, ReportContext, Skip
 from .store import FeatureStore
 
@@ -20,8 +19,8 @@ Role = Literal["mixdown", "stem"]
 @dataclass(frozen=True)
 class Backend:
     name: str
-    beats: Callable[..., Any] = beat_grid
-    meter: Callable[..., Any] = meter
+    beat_grid: Callable[..., Any] = beats.beat_grid
+    meter: Callable[..., Any] = beats.meter
 
 
 BACKENDS = {"builtin": Backend("builtin")}
@@ -48,7 +47,7 @@ def analyze(store: FeatureStore, backend: Backend, role: Role) -> list[tuple[str
     run("pitch class profile", harmony.pitch_profile, store)
     tempo = run("tempo estimate", beats.tempo, store)
     run("key estimate", harmony.key, store)
-    grid = run("beat grid", backend.beats, store, tempo)
+    grid = run("beat grid", backend.beat_grid, store, tempo)
     if role == "mixdown":
         run("meter estimate", backend.meter, store, grid)
         run("swing estimate", beats.swing, store, grid)
@@ -63,15 +62,15 @@ def render(outcomes: list[tuple[str, Outcome]], ctx: ReportContext) -> tuple[lis
             severity = "warning" if outcome.code == "estimate_failed" else "info"
             diagnostics.append(Diagnostic(outcome.code, severity, f"No {label}: {outcome.reason}"))
             continue
-        scoped = replace(ctx, limits=[])
         try:
-            made = outcome.report(scoped)
+            report = outcome.report(ctx)
         # Isolation boundary: a reporting defect, a nonfinite value included, loses only this estimate.
         except Exception as error:
             diagnostics.append(Diagnostic("estimate_failed", "warning",
                                           f"No {label}: reporting failed with {type(error).__name__}: {error}"))
             continue
-        facts.extend(made)
-        diagnostics.extend(Diagnostic("estimate_truncated", "warning", f"The {label} was cut. {limit.message}")
-                           for limit in scoped.limits)
+        facts.extend(report.facts)
+        diagnostics.extend(Diagnostic("estimate_truncated", "warning",
+                                      f"The {label} ({limit.property}) was cut. {limit.message}")
+                           for limit in report.limits)
     return facts, diagnostics

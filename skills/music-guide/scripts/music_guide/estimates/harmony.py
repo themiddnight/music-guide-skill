@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..model import Fact
-from .common import Method, ReportContext, Skip
+from .common import FULL_LIMIT, Method, Report, ReportContext, Skip
 from .store import FeatureStore, bin_sum
 
 PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -23,6 +22,7 @@ MIN_KEY_SECONDS = 2.0
 KEY_CELL_SECONDS = 5.0
 KEY_SWITCH_PENALTY = 2.0
 MIN_KEY_TIMELINE_SECONDS = 30.0
+SUMMARY_SEGMENTS = 64
 
 PROFILE_REASON = ("Share of 65-2100 Hz spectral magnitude per pitch class (A4=440 Hz, about 11 kHz per channel)."
                   " FFT magnitudes are averaged across channels to avoid polarity cancellation."
@@ -46,9 +46,9 @@ TIMELINE_METHOD = Method("krumhansl-kessler-chroma-windows",
 class PitchProfile:
     shares: np.ndarray  # (12,) summing to 1, C first
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
+    def report(self, ctx: ReportContext) -> Report:
         value = {name: round(float(share), 4) for name, share in zip(PITCH_CLASSES, self.shares)}
-        return [ctx.measurement("audio.pitch_class_profile", value, "ratio", "chroma-fft", PROFILE_REASON, "medium")]
+        return ctx.measurement("audio.pitch_class_profile", value, "ratio", "chroma-fft", PROFILE_REASON, "medium")
 
 
 @dataclass(frozen=True)
@@ -65,14 +65,15 @@ class KeyResult:
     method: Method = KEY_METHOD
     timeline_method: Method = TIMELINE_METHOD
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
-        facts = [ctx.estimate("audio.key_estimate", _candidates(self.scores), "key", self.method)]
-        if self.timeline is not None:
-            value = {"cellSeconds": KEY_CELL_SECONDS,
-                     "segments": [{"startSeconds": segment.start, "endSeconds": segment.end,
-                                   **_candidates(segment.scores)} for segment in self.timeline]}
-            facts.append(ctx.estimate("audio.key_timeline", value, "key", self.timeline_method))
-        return facts
+    def report(self, ctx: ReportContext) -> Report:
+        report = ctx.estimate("audio.key_estimate", _candidates(self.scores), "key", self.method)
+        if self.timeline is None:
+            return report
+        segments = [{"startSeconds": segment.start, "endSeconds": segment.end, **_candidates(segment.scores)}
+                    for segment in self.timeline]
+        segments, cut = ctx.cap(segments, FULL_LIMIT if ctx.full else SUMMARY_SEGMENTS, "key segments")
+        value = {"cellSeconds": KEY_CELL_SECONDS, "segments": segments}
+        return report + ctx.estimate("audio.key_timeline", value, "key", self.timeline_method, [cut])
 
 
 def _pitch_skip(store: FeatureStore) -> Skip | None:

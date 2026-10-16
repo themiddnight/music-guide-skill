@@ -8,8 +8,7 @@ import numpy as np
 from scipy import signal
 
 from .. import rhythm
-from ..model import Fact
-from .common import FULL_LIMIT, Method, ReportContext, Skip
+from .common import FULL_LIMIT, Method, Report, ReportContext, Skip
 from .store import FeatureStore
 
 TEMPO_RANGE = (60.0, 200.0)
@@ -44,10 +43,10 @@ class TempoCandidates:
     octave_related: bool
     method: Method = TEMPO_METHOD
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
+    def report(self, ctx: ReportContext) -> Report:
         value = {"candidates": [{"bpm": bpm, "relativeStrength": strength} for bpm, strength in self.candidates],
                  "octaveRelatedCandidates": self.octave_related}
-        return [ctx.estimate("audio.tempo_estimate", value, "BPM", self.method)]
+        return ctx.estimate("audio.tempo_estimate", value, "BPM", self.method)
 
 
 def autocorrelation(envelope: np.ndarray, lags: int) -> np.ndarray:
@@ -114,13 +113,13 @@ class BeatGrid:
     stability: float  # 1 minus the interquartile range of beat intervals over their median, 0..1
     method: Method = BEAT_METHOD
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
+    def report(self, ctx: ReportContext) -> Report:
         value = {"bpm": round(self.bpm, 1), "beatCount": len(self.times),
                  "firstBeatSeconds": round(float(self.times[0]), 3), "tempoStability": round(self.stability, 3)}
         limit = None
         if ctx.full:
             value["beatTimes"], limit = ctx.cap(np.round(self.times, 3).tolist(), FULL_LIMIT, "beat times")
-        return [ctx.estimate("audio.beat_grid", value, "BPM", self.method, [limit])]
+        return ctx.estimate("audio.beat_grid", value, "BPM", self.method, [limit])
 
 
 @dataclass(frozen=True)
@@ -130,13 +129,13 @@ class MeterEstimate:
     downbeats: np.ndarray  # seconds
     method: Method = METER_METHOD
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
+    def report(self, ctx: ReportContext) -> Report:
         value = {"candidates": [{"signature": signature, "score": score} for signature, score in self.candidates],
                  "downbeatPhase": self.downbeat_phase, "barCount": len(self.downbeats)}
         limit = None
         if ctx.full:
             value["downbeatTimes"], limit = ctx.cap(np.round(self.downbeats, 3).tolist(), FULL_LIMIT, "downbeat times")
-        return [ctx.estimate("audio.meter_estimate", value, "meter", self.method, [limit])]
+        return ctx.estimate("audio.meter_estimate", value, "meter", self.method, [limit])
 
 
 @dataclass(frozen=True)
@@ -145,9 +144,9 @@ class Swing:
     pairs: int  # beat intervals with an off-beat onset inside rhythm.SWING_WINDOW
     method: Method = SWING_METHOD
 
-    def report(self, ctx: ReportContext) -> list[Fact]:
+    def report(self, ctx: ReportContext) -> Report:
         value = {"ratio": round(self.ratio, 3), "pairs": self.pairs}
-        return [ctx.estimate("audio.swing_ratio", value, "ratio", self.method)]
+        return ctx.estimate("audio.swing_ratio", value, "ratio", self.method)
 
 
 def _prior(bpm: float) -> float:

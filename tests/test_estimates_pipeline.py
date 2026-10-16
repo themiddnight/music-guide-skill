@@ -14,10 +14,15 @@ import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from signals import click_track, progression, record  # noqa: E402
-from support import SKILL, run_cli  # noqa: E402
+from support import ROOT, SKILL, run_cli  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tools"))
+
+import evaluate  # noqa: E402
 
 from music_guide import estimates  # noqa: E402
-from music_guide.estimates import beats, store  # noqa: E402
+from music_guide.estimates import beats, harmony, store  # noqa: E402
+from music_guide.estimates.common import ReportContext  # noqa: E402
 
 SCHEMA = json.loads((SKILL / "schemas" / "evidence.schema.json").read_text())
 RATE = 48000
@@ -71,7 +76,7 @@ class PipelineTest(unittest.TestCase):
     def test_failed_analyzer_keeps_loudness_and_names_dependents(self):
         def broken(*_):
             raise ZeroDivisionError("boom")
-        with mock.patch.dict(estimates.BACKENDS, {"builtin": estimates.Backend("builtin", beats=broken)}):
+        with mock.patch.dict(estimates.BACKENDS, {"builtin": estimates.Backend("builtin", beat_grid=broken)}):
             data = self.evidence(np.stack([music(20)] * 2, axis=1))
         self.assertEqual(self.messages(data, "estimate_failed"),
                          ["No beat grid: the analyzer failed with ZeroDivisionError: boom"])
@@ -142,6 +147,39 @@ class PipelineTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("12 channels were folded into 8 groups", folded["facts"][name]["confidenceReason"])
                 self.assertIn("Lossy decode", lossy["facts"][name]["confidenceReason"])
+
+
+
+class TruncationTest(unittest.TestCase):
+    def test_truncated_lists_name_their_property_for_the_evaluator(self):
+        samples, _, _ = click_track(120, 4, 30, offbeats=True)
+        recorded = record(samples, RATE, chunk=65536)
+        with mock.patch.object(beats, "FULL_LIMIT", 5):
+            facts, diagnostics = estimates.render(estimates.analyze(recorded, estimates.BACKENDS["builtin"], "mixdown"),
+                                                  ReportContext("full", ""))
+        values = {fact.property: fact.value for fact in facts}
+        self.assertEqual(len(values["audio.beat_grid"]["beatTimes"]), 5)
+        self.assertEqual(len(values["audio.meter_estimate"]["downbeatTimes"]), 5)
+        report = {"observations": [{"property": fact.property, "value": fact.value, "scope": "mixdown"}
+                                   for fact in facts],
+                  "diagnostics": [{"code": item.code, "message": item.message} for item in diagnostics]}
+        observations = evaluate.Observations(report)
+        self.assertTrue(observations.truncated("audio.beat_grid"))
+        self.assertTrue(observations.truncated("audio.meter_estimate"))
+        self.assertFalse(observations.truncated("audio.key_timeline"))
+        self.assertTrue(all(item.severity == "warning" for item in diagnostics if item.code == "estimate_truncated"))
+
+    def test_key_timeline_summary_keeps_64_segments(self):
+        segments = tuple(harmony.KeySegment(5.0 * index, 5.0 * index + 5, np.eye(24)[index % 24])
+                         for index in range(70))
+        result = harmony.KeyResult(np.eye(24)[0], segments)
+        summary, full = result.report(ReportContext("summary", "")), result.report(ReportContext("full", ""))
+        timeline = {fact.property: fact.value for fact in summary.facts}["audio.key_timeline"]
+        self.assertEqual(len(timeline["segments"]), 64)
+        self.assertEqual([limit.property for limit in summary.limits], ["audio.key_timeline"])
+        self.assertIn("Only the first 64 of 70 key segments", summary.facts[1].reason)
+        self.assertEqual(len({fact.property: fact.value for fact in full.facts}["audio.key_timeline"]["segments"]), 70)
+        self.assertEqual(full.limits, ())
 
 
 if __name__ == "__main__":
